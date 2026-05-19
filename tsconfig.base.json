@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@pilab/api": ["apps/api/src/server.ts"],
+      "@pilab/benchmark-spec": ["packages/benchmark-spec/src/index.ts"],
+      "@pilab/case-builder": ["workers/case-builder/src/index.ts"],
+      "@pilab/db": ["packages/db/src/index.ts"],
+      "@pilab/db/schema": ["packages/db/src/schema.ts"],
+      "@pilab/evaluator": ["workers/evaluator/src/index.ts"],
+      "@pilab/github": ["packages/github/src/index.ts"],
+      "@pilab/harness": ["packages/harness/src/index.ts"],
+      "@pilab/jobs": ["packages/jobs/src/index.ts"],
+      "@pilab/judge": ["workers/judge/src/index.ts"],
+      "@pilab/model-sync": ["workers/model-sync/src/index.ts"],
+      "@pilab/object-store": ["packages/object-store/src/index.ts"],
+      "@pilab/runner-pi": ["workers/runner-pi/src/index.ts"],
+      "@pilab/runtime": ["packages/runtime/src/index.ts"],
+      "@pilab/shared": ["packages/shared/src/index.ts"],
+      "@pilab/validation-runner": ["workers/validation-runner/src/index.ts"]
+    }
+  }
+}

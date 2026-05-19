@@ -1,0 +1,1 @@
+ALTER TABLE "benchmark_cases" ADD COLUMN "metadata" jsonb DEFAULT '{}'::jsonb NOT NULL;

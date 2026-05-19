@@ -1,0 +1,32 @@
+{
+  "name": "@pilab/grader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "pnpm run typecheck && pnpm run test",
+    "dev": "tsx src/index.ts",
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "worker": "tsx --env-file=../../.env src/worker.ts"
+  },
+  "dependencies": {
+    "@pilab/db": "workspace:*",
+    "@pilab/jobs": "workspace:*",
+    "@pilab/object-store": "workspace:*",
+    "bullmq": "^5.65.0",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

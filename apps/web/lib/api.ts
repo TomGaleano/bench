@@ -1,0 +1,794 @@
+export type GitHubCaseCreateRequest = {
+  title: string;
+  body?: string;
+  labels?: string[];
+  runId?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type CaseStatus =
+  | "draft"
+  | "building"
+  | "ready"
+  | "frozen"
+  | "rejected"
+  | "archived";
+
+export type GitHubCase = {
+  id: string;
+  title: string;
+  body: string;
+  labels: string[];
+  runId?: string;
+  metadata: Record<string, unknown>;
+  status: CaseStatus;
+  externalUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+  frozenAt: string | null;
+};
+
+export type PiPlanRunRequest = {
+  caseVersionId: string;
+  modelId: string;
+  prompt?: string;
+  workspacePath?: string;
+  maxTurns?: number;
+  maxWallClockSeconds?: number;
+};
+
+export type RunSummary = {
+  id: string;
+  caseVersionId: string | null;
+  mode: string;
+  status: string;
+  modelId: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  eventCount: number;
+  plan?: {
+    id: string;
+    markdown: string | null;
+    artifact: {
+      id: string;
+      kind: string;
+      objectKey: string;
+      byteSize: number | null;
+      contentType: string | null;
+    } | null;
+  } | null;
+  piRunnerJob?: {
+    id: string;
+    state: string;
+    progress: unknown;
+  } | null;
+  gradingStatus?: {
+    plan?: { jobId: string; state: string } | null;
+    implementation?: { jobId: string; state: string } | null;
+    external?: { jobId: string; state: string } | null;
+  };
+};
+
+export type DurableRunEvent = {
+  id: string;
+  runId: string;
+  seq: number;
+  timestamp: string;
+  stage: string;
+  kind: string;
+  payload: unknown;
+};
+
+function getApiBaseUrl(): string {
+  if (typeof window === "undefined") {
+    return process.env.API_BASE_URL ?? "http://localhost:3001";
+  }
+
+  return "/api";
+}
+
+export async function createGitHubCase(payload: GitHubCaseCreateRequest) {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases`, {
+    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GitHubCase>;
+}
+
+export async function createPiPlanRun(payload: PiPlanRunRequest) {
+  const response = await fetch(`${getApiBaseUrl()}/runs/pi/plan`, {
+    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json"
+    },
+    method: "POST"
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<RunSummary>;
+}
+
+export async function listRuns() {
+  const response = await fetch(`${getApiBaseUrl()}/runs`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<RunSummary[]>;
+}
+
+export async function getRun(runId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/runs/${runId}`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<RunSummary>;
+}
+
+export async function getRunEvents(runId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/runs/${runId}/events`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<DurableRunEvent[]>;
+}
+
+export async function listCases() {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GitHubCase[]>;
+}
+
+export async function getCase(caseId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GitHubCase>;
+}
+
+export async function getCaseVersions(caseId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}/versions`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<Array<{ id: string; version: number; status: string; createdAt: string }>>;
+}
+
+export type TestSpecSummary = {
+  id: string;
+  name: string;
+  kind: string;
+  status: string;
+  filePath: string | null;
+  testCommand: string;
+  expectedFailureMode: string | null;
+  expectedPassMode: string | null;
+  content: string | null;
+  createdAt: string;
+};
+
+export type ValidationAttemptSummary = {
+  id: string;
+  status: string;
+  attemptNumber: number;
+  strategy: string;
+  previousAttemptId: string | null;
+  acceptedTestCount: number;
+  rejectedTestCount: number;
+  runnerVersion: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export type ReproductionStepSummary = {
+  id: string;
+  validationAttemptId: string | null;
+  steps: Array<{ description: string; command: string }>;
+  script: string;
+  rationale: string | null;
+  status: string;
+  reproducedOnBase: boolean | null;
+  fixedOnGold: boolean | null;
+  createdAt: string;
+};
+
+export type CaseVersionDetail = {
+  id: string;
+  caseId: string;
+  version: number;
+  status: string;
+  repoOwner: string;
+  repoName: string;
+  baseCommitSha: string;
+  goldCommitSha: string | null;
+  testBuilderModelId: string | null;
+  validationRunnerVersion: string | null;
+  createdAt: string;
+  frozenAt: string | null;
+  testSpecs: TestSpecSummary[];
+  validationAttempts: ValidationAttemptSummary[];
+  reproductionSteps: ReproductionStepSummary[];
+};
+
+export async function getCaseVersionDetail(caseId: string, versionId: string) {
+  const response = await fetch(
+    `${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}/versions/${encodeURIComponent(versionId)}`,
+    { cache: "no-store" },
+  );
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<CaseVersionDetail>;
+}
+
+export async function freezeCase(caseId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}/freeze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Freeze failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GitHubCase>;
+}
+
+export async function rejectCase(caseId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Reject failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GitHubCase>;
+}
+
+export type ModelInfo = {
+  id: string;
+  name: string;
+  provider: string;
+  description?: string;
+  releasedAt?: number;
+  modality?: string;
+  contextWindow?: number;
+  inputUsdPer1M?: number;
+  outputUsdPer1M?: number;
+  supportsToolCalling: boolean;
+  supportsStructuredOutputs: boolean;
+};
+
+export type DatasetSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  status: string;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  caseCount: number;
+};
+
+export type DatasetDetail = {
+  dataset: {
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    status: string;
+    tags: string[];
+    metadata: Record<string, unknown>;
+    createdAt: string;
+    updatedAt: string;
+  };
+  cases: Array<{
+    id: string;
+    slug: string;
+    title: string;
+    status: string;
+    repo: string;
+  }>;
+};
+
+export type QueueStatus = {
+  queueName: string;
+  waiting: number;
+  active: number;
+  completed: number;
+  failed: number;
+  delayed: number;
+  paused: number;
+  hasWorkers: boolean;
+};
+
+export type WorkersStatus = {
+  caseBuilder: QueueStatus;
+  validationRunner: QueueStatus;
+};
+
+export async function getWorkersStatus() {
+  const response = await fetch(`${getApiBaseUrl()}/workers/status`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<WorkersStatus>;
+}
+
+export type CaseRunResult = {
+  runId: string;
+  caseVersionId: string | null;
+  modelId: string | null;
+  mode: string;
+  status: string;
+  chargedCost: number | null;
+  computedCost: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+};
+
+export type CaseResultsPayload = {
+  caseId: string;
+  versions: number;
+  results: CaseRunResult[];
+};
+
+export async function getCaseResults(caseId: string) {
+  const response = await fetch(
+    `${getApiBaseUrl()}/github/cases/${encodeURIComponent(caseId)}/results`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<CaseResultsPayload>;
+}
+
+export type KpiCellPayload = {
+  value: number;
+  modelId: string | null;
+  deltaWeekPct: number;
+  spark: number[];
+};
+
+export type ActiveExperimentPayload = {
+  id: string;
+  name: string;
+  modelsCount: number;
+  tasksCount: number;
+  harness: string | null;
+  done: number;
+  failed: number;
+  active: number;
+  queued: number;
+  spentUsd: number;
+  budgetUsd: number | null;
+  elapsedMs: number;
+} | null;
+
+export type LeaderboardRow = {
+  rank: number;
+  modelId: string;
+  harness: string | null;
+  plan: number;
+  impl: number;
+  e2e: number;
+  costPerTask: number;
+  costPerResolved: number;
+  trend6w: number[];
+  deltaWeekPct: number;
+};
+
+export type MetricsOverview = {
+  retrievedAt: string;
+  kpis: {
+    bestE2E: KpiCellPayload;
+    bestPlan: KpiCellPayload;
+    lowestCostPerResolved: KpiCellPayload;
+    runs7d: KpiCellPayload;
+  };
+  activeExperiment: ActiveExperimentPayload;
+  race: Array<{ modelId: string; short: string; trend: number[] }>;
+  scatter: Array<{ modelId: string; costPerResolved: number; e2e: number }>;
+  leaderboard: LeaderboardRow[];
+};
+
+export async function getMetricsOverview() {
+  const response = await fetch(`${getApiBaseUrl()}/metrics/overview`, { cache: "no-store" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<MetricsOverview>;
+}
+
+export async function listModels() {
+  const response = await fetch(`${getApiBaseUrl()}/models`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  const data = await response.json() as { count: number; retrievedAt: string; models: ModelInfo[] };
+  return data.models;
+}
+
+export async function listDatasets() {
+  const response = await fetch(`${getApiBaseUrl()}/datasets`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  const data = await response.json() as { datasets: DatasetSummary[] };
+  return data.datasets;
+}
+
+export async function getDataset(slug: string) {
+  const response = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(slug)}`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<DatasetDetail>;
+}
+
+export async function createDataset(payload: { slug: string; name: string; description?: string; caseIds?: string[] }) {
+  const response = await fetch(`${getApiBaseUrl()}/datasets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ dataset: DatasetSummary }>;
+}
+
+export async function deleteDataset(slug: string) {
+  const response = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ deleted: boolean }>;
+}
+
+export async function addCasesToDataset(slug: string, caseIds: string[]) {
+  const response = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(slug)}/cases`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ caseIds }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ added: number }>;
+}
+
+export async function removeCaseFromDataset(slug: string, caseId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/datasets/${encodeURIComponent(slug)}/cases/${encodeURIComponent(caseId)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ removed: boolean }>;
+}
+
+// ─── Benchmark types ──────────────────────────────────────────────
+
+export type BenchmarkAgentConfig = {
+  modelId: string;
+  mode: "plan-only" | "implementation-only" | "end-to-end";
+};
+
+export type CreateBenchmarkData = {
+  name: string;
+  datasetId: string;
+  mode: "plan_only" | "implementation_only" | "end_to_end";
+  agentConfigs: Array<{
+    modelId: string;
+    mode?: "plan_only" | "implementation_only" | "end_to_end";
+    maxTurns?: number;
+    maxWallClockSeconds?: number;
+  }>;
+};
+
+export type BenchmarkExperiment = {
+  id: string;
+  name: string;
+  datasetSlug: string;
+  datasetName?: string;
+  status: string;
+  agent1ModelId: string;
+  agent1Mode: string;
+  agent2ModelId: string | null;
+  agent2Mode: string | null;
+  totalCases: number;
+  totalRuns: number;
+  completedRuns: number;
+  failedRuns: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export type BenchmarkRun = {
+  id: string;
+  benchmarkId: string;
+  agent: "agent1" | "agent2";
+  caseId: string;
+  caseTitle?: string;
+  mode: string;
+  modelId: string;
+  status: string;
+  stage: string;
+  eventCount: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export type BenchmarkResults = {
+  benchmarkId: string;
+  name: string;
+  datasetSlug: string;
+  status: string;
+  agent1: BenchmarkResultsAgent;
+  agent2: BenchmarkResultsAgent;
+  perCase: BenchmarkCaseResult[];
+  winner: "agent1" | "agent2" | "tie" | null;
+};
+
+export type BenchmarkResultsAgent = {
+  modelId: string;
+  mode: string;
+  planScore: number | null;
+  implScore: number | null;
+  testScore: number | null;
+  graderVerdict: "winner" | "runner_up" | "tie" | null;
+  totalScore: number | null;
+  resolvedCases: number;
+  totalCases: number;
+};
+
+export type BenchmarkCaseResult = {
+  caseId: string;
+  caseTitle: string;
+  agent1Status: string;
+  agent2Status: string;
+  agent1PlanScore: number | null;
+  agent2PlanScore: number | null;
+  agent1ImplScore: number | null;
+  agent2ImplScore: number | null;
+  agent1TestPassed: boolean | null;
+  agent2TestPassed: boolean | null;
+  winner: "agent1" | "agent2" | "tie" | null;
+};
+
+export type GradingScores = {
+  runId: string;
+  planScore: number | null;
+  implScore: number | null;
+  testScore: number | null;
+  graderVerdict: string | null;
+  totalScore: number | null;
+  gradedAt: string | null;
+};
+
+// ─── Benchmark API functions ──────────────────────────────────────
+
+export async function getBenchmarks(): Promise<BenchmarkExperiment[]> {
+  const response = await fetch(`${getApiBaseUrl()}/benchmarks`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<BenchmarkExperiment[]>;
+}
+
+export async function getBenchmark(id: string): Promise<BenchmarkExperiment> {
+  const response = await fetch(`${getApiBaseUrl()}/benchmarks/${encodeURIComponent(id)}`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<BenchmarkExperiment>;
+}
+
+export async function createBenchmark(data: CreateBenchmarkData): Promise<BenchmarkExperiment> {
+  const response = await fetch(`${getApiBaseUrl()}/benchmarks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<BenchmarkExperiment>;
+}
+
+export async function startBenchmark(id: string): Promise<{ status: string; runCount: number }> {
+  const response = await fetch(`${getApiBaseUrl()}/benchmarks/${encodeURIComponent(id)}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ status: string; runCount: number }>;
+}
+
+export async function getBenchmarkResults(id: string): Promise<BenchmarkResults> {
+  const response = await fetch(`${getApiBaseUrl()}/benchmarks/${encodeURIComponent(id)}/results`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<BenchmarkResults>;
+}
+
+export async function gradePlan(runId: string, judgeModelId?: string): Promise<{ jobId: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/grading/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(judgeModelId ? { runId, judgeModelId } : { runId }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ jobId: string }>;
+}
+
+export async function gradeImplementation(runId: string, judgeModelId?: string): Promise<{ jobId: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/grading/implementation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(judgeModelId ? { runId, judgeModelId } : { runId }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ jobId: string }>;
+}
+
+export async function gradeExternal(runAId: string, runBId: string, judgeModelId?: string): Promise<{ jobId: string }> {
+  const response = await fetch(`${getApiBaseUrl()}/grading/external`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(judgeModelId ? { runAId, runBId, judgeModelId } : { runAId, runBId }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ jobId: string }>;
+}
+
+export async function getGradingScores(runId: string): Promise<GradingScores> {
+  const response = await fetch(`${getApiBaseUrl()}/runs/${encodeURIComponent(runId)}/scores`, {
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<GradingScores>;
+}
+
+export type CreateImplRunData = {
+  caseVersionId: string;
+  modelId: string;
+  planArtifactKey?: string;
+  maxTurns?: number;
+  maxWallClockSeconds?: number;
+};
+
+export async function createImplRun(data: CreateImplRunData): Promise<RunSummary> {
+  const response = await fetch(`${getApiBaseUrl()}/runs/pi/impl`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<RunSummary>;
+}

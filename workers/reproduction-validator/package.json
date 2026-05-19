@@ -1,0 +1,32 @@
+{
+  "name": "@pilab/reproduction-validator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "pnpm run typecheck && pnpm run test",
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "worker": "tsx --env-file=../../.env src/worker.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.0",
+    "@pilab/db": "workspace:*",
+    "@pilab/jobs": "workspace:*",
+    "@pilab/object-store": "workspace:*",
+    "@pilab/runtime": "workspace:*",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

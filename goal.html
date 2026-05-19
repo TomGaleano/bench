@@ -1,0 +1,1667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pi Lab — Benchmark Run Mock</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink-5: #0a0a0b;
+      --ink-4: #1a1a1e;
+      --ink-3: #2a2a30;
+      --ink-2: #4a4a52;
+      --ink-1: #7a7a86;
+      --rule-3: #e4e4e7;
+      --rule-2: #d4d4d8;
+      --rule-1: #f4f4f5;
+      --paper: #fafafa;
+      --accent: #6366f1;
+      --accent-soft: #e0e7ff;
+      --accent-wash: #eef2ff;
+      --success: #22c55e;
+      --warn: #f59e0b;
+      --error: #ef4444;
+      --gold: #fbbf24;
+      --silver: #94a3b8;
+      --bronze: #d97706;
+      --font-serif: 'Instrument Serif', Georgia, serif;
+      --font-mono: 'IBM Plex Mono', monospace;
+      --font-sans: 'Inter', system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: var(--font-sans);
+      background: var(--paper);
+      color: var(--ink-5);
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    /* ---- ANIMATIONS ---- */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(24px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    @keyframes slideRight {
+      from { opacity: 0; transform: translateX(-16px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    @keyframes typing {
+      from { width: 0; }
+      to { width: 100%; }
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+    @keyframes streamIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+    @keyframes scaleIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    @keyframes confetti {
+      0% { transform: translateY(0) rotate(0deg); opacity: 1; }
+      100% { transform: translateY(-120vh) rotate(720deg); opacity: 0; }
+    }
+    @keyframes progressStripe {
+      0% { background-position: 0 0; }
+      100% { background-position: 40px 0; }
+    }
+
+    .anim-fadeUp { animation: fadeUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
+    .anim-fadeIn { animation: fadeIn 0.5s ease both; }
+    .anim-slideRight { animation: slideRight 0.5s ease both; }
+    .anim-streamIn { animation: streamIn 0.3s ease both; }
+    .anim-scaleIn { animation: scaleIn 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+    .delay-1 { animation-delay: 0.1s; }
+    .delay-2 { animation-delay: 0.2s; }
+    .delay-3 { animation-delay: 0.3s; }
+    .delay-4 { animation-delay: 0.4s; }
+    .delay-5 { animation-delay: 0.5s; }
+    .delay-6 { animation-delay: 0.6s; }
+    .delay-8 { animation-delay: 0.8s; }
+    .delay-10 { animation-delay: 1.0s; }
+    .delay-12 { animation-delay: 1.2s; }
+
+    /* ---- HEADER ---- */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(250,250,250,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--rule-3);
+      padding: 0 32px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .brand-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .nav-links {
+      display: flex;
+      gap: 24px;
+      font-size: 13px;
+      color: var(--ink-2);
+    }
+    .nav-links a {
+      text-decoration: none;
+      color: inherit;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover { color: var(--ink-5); }
+
+    /* ---- HERO ---- */
+    .hero {
+      padding: 64px 32px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .hero-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-1);
+      margin-bottom: 12px;
+    }
+    .hero h1 {
+      font-family: var(--font-serif);
+      font-size: 48px;
+      font-weight: 400;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+    .hero h1 em {
+      font-style: italic;
+      color: var(--accent);
+    }
+    .hero-sub {
+      font-size: 16px;
+      color: var(--ink-2);
+      max-width: 560px;
+    }
+
+    /* ---- SECTIONS ---- */
+    .section {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 32px;
+      border-top: 1px solid var(--rule-3);
+    }
+    .section-header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .section-num {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      width: 24px; height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1.5px solid var(--rule-2);
+      border-radius: 50%;
+      color: var(--ink-2);
+      flex-shrink: 0;
+    }
+    .section-title {
+      font-family: var(--font-serif);
+      font-size: 28px;
+      font-weight: 400;
+      letter-spacing: -0.01em;
+    }
+
+    /* ---- CARDS ---- */
+    .card {
+      background: #fff;
+      border: 1px solid var(--rule-3);
+      border-radius: 12px;
+      padding: 24px;
+      transition: box-shadow 0.2s, transform 0.2s;
+    }
+    .card:hover {
+      box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .card-title {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--ink-2);
+    }
+    .badge {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+    .badge-success { background: #dcfce7; color: #166534; }
+    .badge-warn { background: #fef3c7; color: #92400e; }
+    .badge-info { background: var(--accent-soft); color: #3730a3; }
+    .badge-frozen { background: #dbeafe; color: #1e40af; }
+
+    /* ---- WIZARD ---- */
+    .wizard-rail {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 32px;
+      align-items: center;
+    }
+    .rail-step {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-1);
+    }
+    .rail-pip {
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      border: 1.5px solid var(--rule-2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 600;
+      transition: all 0.3s;
+    }
+    .rail-pip.done {
+      background: var(--success);
+      border-color: var(--success);
+      color: #fff;
+    }
+    .rail-pip.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .rail-line {
+      width: 24px;
+      height: 1.5px;
+      background: var(--rule-2);
+    }
+    .rail-line.done { background: var(--success); }
+
+    .issue-card {
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .issue-avatar {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), #a5b4fc);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      flex-shrink: 0;
+    }
+    .issue-meta {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--ink-1);
+      margin-bottom: 4px;
+    }
+    .issue-title {
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 6px;
+    }
+    .issue-body {
+      font-size: 13px;
+      color: var(--ink-2);
+      line-height: 1.6;
+      max-height: 80px;
+      overflow: hidden;
+      position: relative;
+    }
+    .issue-body::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 30px;
+      background: linear-gradient(transparent, #fff);
+    }
+
+    /* ---- GRID ---- */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    @media (max-width: 900px) {
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+
+    /* ---- TERMINAL / SHELL ---- */
+    .shell {
+      background: var(--ink-5);
+      border-radius: 10px;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .shell-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 14px;
+      background: var(--ink-4);
+      border-bottom: 1px solid var(--ink-3);
+    }
+    .shell-dot { width: 10px; height: 10px; border-radius: 50%; }
+    .shell-dot.red { background: #ff5f56; }
+    .shell-dot.yellow { background: #ffbd2e; }
+    .shell-dot.green { background: #27c93f; }
+    .shell-title {
+      margin-left: 8px;
+      font-size: 11px;
+      color: var(--ink-1);
+      font-weight: 500;
+    }
+    .shell-body {
+      padding: 16px;
+      color: #e4e4e7;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .shell-body .cmd { color: #a5b4fc; }
+    .shell-body .out { color: #d4d4d8; }
+    .shell-body .ok { color: #86efac; }
+    .shell-body .err { color: #fca5a5; }
+    .shell-body .dim { color: #71717a; }
+    .cursor {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      background: var(--accent);
+      animation: blink 1s step-end infinite;
+      vertical-align: middle;
+    }
+
+    /* ---- STREAMING TEXT ---- */
+    .stream-line {
+      opacity: 0;
+      animation: streamIn 0.2s ease forwards;
+    }
+    .stream-prompt {
+      color: #a5b4fc;
+      margin-right: 6px;
+    }
+
+    /* ---- SPLIT PANEL ---- */
+    .split-panel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      min-height: 400px;
+    }
+    @media (max-width: 900px) {
+      .split-panel { grid-template-columns: 1fr; }
+    }
+    .panel-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-1);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .panel-label .live-pip {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--success);
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    /* ---- PROGRESS BAR ---- */
+    .progress-track {
+      width: 100%;
+      height: 6px;
+      background: var(--rule-1);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 12px 0;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), #818cf8);
+      border-radius: 3px;
+      transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+      background-size: 40px 40px;
+    }
+    .progress-fill.animated {
+      animation: progressStripe 1s linear infinite;
+      background-image: linear-gradient(
+        45deg,
+        rgba(255,255,255,0.15) 25%,
+        transparent 25%,
+        transparent 50%,
+        rgba(255,255,255,0.15) 50%,
+        rgba(255,255,255,0.15) 75%,
+        transparent 75%,
+        transparent
+      );
+    }
+
+    /* ---- METRICS ---- */
+    .kpi-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 900px) {
+      .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+    }
+    .kpi-cell {
+      background: #fff;
+      border: 1px solid var(--rule-3);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .kpi-label {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-1);
+      margin-bottom: 8px;
+    }
+    .kpi-value {
+      font-family: var(--font-serif);
+      font-size: 32px;
+      font-weight: 400;
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+    .kpi-delta {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--success);
+    }
+    .kpi-delta.neg { color: var(--error); }
+
+    /* ---- TABLE ---- */
+    .mdl-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .mdl-table th {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--ink-1);
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--rule-3);
+      font-weight: 500;
+    }
+    .mdl-table td {
+      padding: 12px;
+      border-bottom: 1px solid var(--rule-3);
+      vertical-align: middle;
+    }
+    .mdl-table tr:hover td { background: var(--accent-wash); }
+    .repo-dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      background: var(--accent);
+    }
+
+    /* ---- PODIUM ---- */
+    .podium {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 24px;
+      padding: 40px 0;
+      min-height: 320px;
+    }
+    .podium-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      transition: transform 0.3s;
+    }
+    .podium-block:hover { transform: translateY(-4px); }
+    .podium-avatar {
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 600;
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    }
+    .podium-avatar.gold { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+    .podium-avatar.silver { background: linear-gradient(135deg, #94a3b8, #64748b); }
+    .podium-avatar.bronze { background: linear-gradient(135deg, #d97706, #b45309); }
+    .podium-bar {
+      width: 120px;
+      border-radius: 8px 8px 0 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      padding-bottom: 16px;
+      color: #fff;
+      font-family: var(--font-mono);
+      position: relative;
+      overflow: hidden;
+    }
+    .podium-bar.gold {
+      height: 200px;
+      background: linear-gradient(180deg, #fbbf24, #f59e0b);
+    }
+    .podium-bar.silver {
+      height: 160px;
+      background: linear-gradient(180deg, #94a3b8, #64748b);
+    }
+    .podium-bar.bronze {
+      height: 130px;
+      background: linear-gradient(180deg, #d97706, #b45309);
+    }
+    .podium-score {
+      font-size: 28px;
+      font-weight: 600;
+      line-height: 1;
+    }
+    .podium-name {
+      font-size: 11px;
+      opacity: 0.9;
+      margin-top: 4px;
+    }
+    .podium-model {
+      font-size: 10px;
+      opacity: 0.7;
+      margin-top: 2px;
+    }
+    .podium-rank {
+      position: absolute;
+      top: 12px;
+      font-size: 32px;
+      font-weight: 700;
+      opacity: 0.2;
+    }
+
+    /* ---- CONFETTI ---- */
+    .confetti-piece {
+      position: fixed;
+      width: 8px; height: 8px;
+      border-radius: 2px;
+      animation: confetti 3s ease-out forwards;
+      z-index: 200;
+      pointer-events: none;
+    }
+
+    /* ---- DIFF VIEWER ---- */
+    .diff2 {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.7;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--rule-3);
+    }
+    .diff2-line {
+      display: flex;
+      padding: 1px 12px;
+    }
+    .diff2-gutter {
+      width: 32px;
+      text-align: right;
+      padding-right: 12px;
+      color: var(--ink-1);
+      user-select: none;
+      flex-shrink: 0;
+    }
+    .diff2-plus { background: #dcfce7; color: #166534; }
+    .diff2-minus { background: #fee2e2; color: #991b1b; }
+    .diff2-ctx { background: #fff; color: var(--ink-3); }
+    .diff2-header { background: var(--accent-wash); color: var(--accent); font-weight: 500; }
+
+    /* ---- ARTIFACT PREVIEW ---- */
+    .artifact-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+    }
+    .artifact-tile {
+      background: #fff;
+      border: 1px solid var(--rule-3);
+      border-radius: 8px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+    }
+    .artifact-tile:hover {
+      border-color: var(--accent);
+      box-shadow: 0 2px 12px rgba(99,102,241,0.08);
+    }
+    .artifact-tile .icon {
+      width: 32px; height: 32px;
+      border-radius: 6px;
+      background: var(--accent-wash);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 10px;
+      font-size: 14px;
+    }
+    .artifact-tile .name {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--ink-5);
+      margin-bottom: 4px;
+    }
+    .artifact-tile .meta {
+      font-size: 11px;
+      color: var(--ink-1);
+    }
+
+    /* ---- TOGGLE / TABS ---- */
+    .tab-bar {
+      display: flex;
+      gap: 4px;
+      background: var(--rule-1);
+      padding: 4px;
+      border-radius: 8px;
+      width: fit-content;
+      margin-bottom: 20px;
+    }
+    .tab-btn {
+      font-family: var(--font-sans);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--ink-2);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab-btn.active {
+      background: #fff;
+      color: var(--ink-5);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .tab-btn:hover:not(.active) { color: var(--ink-5); }
+
+    /* ---- SCORE BADGE ---- */
+    .score-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--accent-wash);
+      color: var(--accent);
+    }
+    .score-ring {
+      width: 18px; height: 18px;
+      border-radius: 50%;
+      border: 2.5px solid var(--accent);
+      border-top-color: transparent;
+      transform: rotate(45deg);
+    }
+
+    /* ---- FOOTER ---- */
+    .footer {
+      text-align: center;
+      padding: 60px 32px;
+      color: var(--ink-1);
+      font-size: 12px;
+      border-top: 1px solid var(--rule-3);
+      margin-top: 40px;
+    }
+
+    /* ---- SCROLL REVEAL ---- */
+    .reveal {
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- TOPBAR -->
+  <div class="topbar anim-fadeIn">
+    <div class="brand">
+      <div class="brand-dot"></div>
+      <span>Pi Lab</span>
+    </div>
+    <nav class="nav-links">
+      <a href="#task">Task</a>
+      <a href="#dataset">Dataset</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#grading">Grading</a>
+      <a href="#results">Results</a>
+    </nav>
+  </div>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="hero-eyebrow anim-fadeUp">Benchmark run preview</div>
+    <h1 class="anim-fadeUp delay-1">
+      Run the first <em>comparative</em><br />agent benchmark
+    </h1>
+    <p class="hero-sub anim-fadeUp delay-2">
+      Two agents. Two stages. One dataset of real GitHub issues. 
+      Watch them plan, implement, and compete — then grade them side by side.
+    </p>
+  </section>
+
+  <!-- KPI STRIP -->
+  <section class="section" style="padding-top: 20px;">
+    <div class="kpi-strip">
+      <div class="kpi-cell anim-fadeUp delay-2">
+        <div class="kpi-label">Tasks frozen</div>
+        <div class="kpi-value">3</div>
+        <div class="kpi-delta">+1 from last run</div>
+      </div>
+      <div class="kpi-cell anim-fadeUp delay-3">
+        <div class="kpi-label">Agents competing</div>
+        <div class="kpi-value">2</div>
+        <div class="kpi-delta">GPT-5.4-mini vs Claude-4</div>
+      </div>
+      <div class="kpi-cell anim-fadeUp delay-4">
+        <div class="kpi-label">Tests in dataset</div>
+        <div class="kpi-value">7</div>
+        <div class="kpi-delta">4 fail-to-pass, 3 pass-to-pass</div>
+      </div>
+      <div class="kpi-cell anim-fadeUp delay-5">
+        <div class="kpi-label">Est. runtime</div>
+        <div class="kpi-value">~14m</div>
+        <div class="kpi-delta">per agent per task</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 1: TASK SETUP WIZARD -->
+  <section class="section" id="task">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">1</div>
+      <div class="section-title">Task setup wizard</div>
+    </div>
+
+    <div class="wizard-rail anim-fadeUp delay-1">
+      <div class="rail-step">
+        <div class="rail-pip done">&#10003;</div>
+        <span>Source</span>
+      </div>
+      <div class="rail-line done"></div>
+      <div class="rail-step">
+        <div class="rail-pip done">&#10003;</div>
+        <span>Issue</span>
+      </div>
+      <div class="rail-line done"></div>
+      <div class="rail-step">
+        <div class="rail-pip done">&#10003;</div>
+        <span>Pull request</span>
+      </div>
+      <div class="rail-line done"></div>
+      <div class="rail-step">
+        <div class="rail-pip done">&#10003;</div>
+        <span>Entry</span>
+      </div>
+      <div class="rail-line done"></div>
+      <div class="rail-step">
+        <div class="rail-pip done">&#10003;</div>
+        <span>Validation</span>
+      </div>
+      <div class="rail-line done"></div>
+      <div class="rail-step">
+        <div class="rail-pip active">6</div>
+        <span>Review</span>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card anim-fadeUp delay-2">
+        <div class="card-header">
+          <div class="card-title">Imported issue</div>
+          <span class="badge badge-success">Frozen</span>
+        </div>
+        <div class="issue-card">
+          <div class="issue-avatar">R</div>
+          <div>
+            <div class="issue-meta">facebook/react #27503 &middot; opened 2023-09-14</div>
+            <div class="issue-title">[Flight] Enforce "simple object" rule in production</div>
+            <div class="issue-body">
+              React Flight currently allows complex objects to pass through in production builds,
+              which can lead to subtle serialization bugs. We should enforce the same "simple object"
+              validation that exists in development mode. This affects server components that
+              inadvertently return class instances or functions...
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card anim-fadeUp delay-3">
+        <div class="card-header">
+          <div class="card-title">Selected pull request</div>
+          <span class="badge badge-frozen">#27502</span>
+        </div>
+        <div class="issue-card">
+          <div class="issue-avatar" style="background: linear-gradient(135deg, #22c55e, #16a34a);">P</div>
+          <div>
+            <div class="issue-meta">facebook/react #27502 &middot; merged 2023-09-15</div>
+            <div class="issue-title">[Flight] Enforce "simple object" rule in production</div>
+            <div class="issue-body" style="max-height: none;">
+              <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-top: 8px;">
+                Base: <span style="color: var(--ink-3);">537228f9</span> &middot;
+                Head: <span style="color: var(--ink-3);">ff89f2b2</span> &middot;
+                Merge: <span style="color: var(--ink-3);">e61a60fa</span>
+              </div>
+              <div style="margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap;">
+                <span class="badge badge-info">7 files changed</span>
+                <span class="badge badge-success">+142 −38</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card anim-fadeUp delay-4" style="margin-top: 20px;">
+      <div class="card-header">
+        <div class="card-title">Test specs &middot; 2 accepted</div>
+        <span class="badge badge-success">Ready for benchmark</span>
+      </div>
+      <table class="mdl-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>File path</th>
+            <th>Command</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span style="font-family: var(--font-mono); font-size: 11px; color: var(--warn);">FAIL_TO_PASS</span></td>
+            <td style="font-family: var(--font-mono); font-size: 12px;">packages/react-server/src/__tests__/Flight-test.js</td>
+            <td style="font-family: var(--font-mono); font-size: 11px;">npm test -- Flight-test</td>
+            <td><span class="badge badge-success">Accepted</span></td>
+          </tr>
+          <tr>
+            <td><span style="font-family: var(--font-mono); font-size: 11px; color: var(--success);">PASS_TO_PASS</span></td>
+            <td style="font-family: var(--font-mono); font-size: 12px;">packages/react-server/src/__tests__/FlightSerializer-test.js</td>
+            <td style="font-family: var(--font-mono); font-size: 11px;">npm test -- FlightSerializer-test</td>
+            <td><span class="badge badge-success">Accepted</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- SECTION 2: DATASET CREATION -->
+  <section class="section" id="dataset">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">2</div>
+      <div class="section-title">Dataset assembly</div>
+    </div>
+
+    <div class="card anim-fadeUp delay-1">
+      <div class="card-header">
+        <div class="card-title">Dataset: react-flight-suite-v1</div>
+        <span class="badge badge-frozen">3 cases</span>
+      </div>
+      <table class="mdl-table">
+        <thead>
+          <tr>
+            <th>Repo</th>
+            <th>Issue</th>
+            <th>PR</th>
+            <th>Tests</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="repo-dot"></span>facebook/react</td>
+            <td>#27503</td>
+            <td>#27502</td>
+            <td>2</td>
+            <td><span class="badge badge-success">Frozen</span></td>
+          </tr>
+          <tr>
+            <td><span class="repo-dot" style="background: #f59e0b;"></span>facebook/react</td>
+            <td>#27492</td>
+            <td>#27491</td>
+            <td>3</td>
+            <td><span class="badge badge-success">Frozen</span></td>
+          </tr>
+          <tr>
+            <td><span class="repo-dot" style="background: #22c55e;"></span>vercel/next.js</td>
+            <td>#54210</td>
+            <td>#54211</td>
+            <td>2</td>
+            <td><span class="badge badge-success">Frozen</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--rule-3);">
+        <div class="progress-track">
+          <div class="progress-fill" style="width: 100%;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">
+          <span>All 3 cases validated and frozen</span>
+          <span>3/3</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 3: BENCHMARK SETUP -->
+  <section class="section" id="benchmark">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">3</div>
+      <div class="section-title">Benchmark orchestration</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card anim-fadeUp delay-1">
+        <div class="card-header">
+          <div class="card-title">Agent configuration</div>
+          <span class="badge badge-info">2 agents</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--accent-wash); border-radius: 8px;">
+            <div style="width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #6366f1, #818cf8); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: #fff;">A1</div>
+            <div>
+              <div style="font-weight: 500; font-size: 13px;">Planner-Heavy</div>
+              <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">openai/gpt-5.4-mini &middot; plan-only</div>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--rule-1); border-radius: 8px;">
+            <div style="width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, #f59e0b, #fbbf24); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: #fff;">A2</div>
+            <div>
+              <div style="font-weight: 500; font-size: 13px;">End-to-End</div>
+              <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">anthropic/claude-4 &middot; full harness</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card anim-fadeUp delay-2">
+        <div class="card-header">
+          <div class="card-title">Docker environment</div>
+          <span class="badge badge-success">Healthy</span>
+        </div>
+        <div class="shell" style="font-size: 11px;">
+          <div class="shell-header">
+            <div class="shell-dot red"></div>
+            <div class="shell-dot yellow"></div>
+            <div class="shell-dot green"></div>
+            <span class="shell-title">pilab-evaluator-7a3f</span>
+          </div>
+          <div class="shell-body" style="max-height: 180px;">
+            <div class="cmd">$ docker compose -f infra/compose.yaml up -d evaluator</div>
+            <div class="out">[+] Running 3/3</div>
+            <div class="out"> &#10003; Container pilab-postgres  Healthy</div>
+            <div class="out"> &#10003; Container pilab-redis     Healthy</div>
+            <div class="out"> &#10003; Container pilab-evaluator Started</div>
+            <div class="out dim">---</div>
+            <div class="cmd">$ docker exec pilab-evaluator node --version</div>
+            <div class="out ok">v20.11.0</div>
+            <div class="cmd">$ docker exec pilab-evaluator git --version</div>
+            <div class="out ok">git version 2.43.0</div>
+            <div class="cmd">$ docker exec pilab-evaluator python3 --version</div>
+            <div class="out ok">Python 3.11.7</div>
+            <div class="dim">Cloning repos and installing deps for 3 cases...</div>
+            <div class="cursor"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 4: GRADING — PLANNING -->
+  <section class="section" id="grading">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">4</div>
+      <div class="section-title">Grading &middot; Stage 1: Planning</div>
+    </div>
+
+    <div class="tab-bar anim-fadeUp delay-1">
+      <button class="tab-btn active" onclick="switchTab(this, 'plan-agent1')">Agent 1</button>
+      <button class="tab-btn" onclick="switchTab(this, 'plan-agent2')">Agent 2</button>
+      <button class="tab-btn" onclick="switchTab(this, 'plan-diff')">Gold diff</button>
+      <button class="tab-btn" onclick="switchTab(this, 'plan-score')">LLM Score</button>
+    </div>
+
+    <div id="plan-agent1" class="tab-panel anim-fadeUp delay-2">
+      <div class="split-panel">
+        <div>
+          <div class="panel-label"><span class="live-pip"></span>Agent 1 stream &middot; openai/gpt-5.4-mini</div>
+          <div class="shell">
+            <div class="shell-header">
+              <div class="shell-dot red"></div>
+              <div class="shell-dot yellow"></div>
+              <div class="shell-dot green"></div>
+              <span class="shell-title">plan-only</span>
+            </div>
+            <div class="shell-body" id="agent1-stream">
+              <div class="stream-line" style="animation-delay: 0s;"><span class="stream-prompt">&gt;</span>Reading issue description...</div>
+              <div class="stream-line" style="animation-delay: 0.3s;"><span class="stream-prompt">&gt;</span>Grep for "simpleObject" in codebase...</div>
+              <div class="stream-line" style="animation-delay: 0.6s;"><span class="stream-prompt">&gt;</span>Found 3 references in packages/react-server/src/ReactFlightServer.js</div>
+              <div class="stream-line" style="animation-delay: 0.9s;"><span class="stream-prompt">&gt;</span>Reading packages/react-server/src/ReactFlightServer.js:124-156</div>
+              <div class="stream-line" style="animation-delay: 1.2s;"><span class="stream-prompt">&gt;</span>Dev check exists at line 142. Need to mirror in prod build path.</div>
+              <div class="stream-line" style="animation-delay: 1.5s;"><span class="stream-prompt">&gt;</span>Identified target: packages/react-server/src/ReactFlightServer.js</div>
+              <div class="stream-line" style="animation-delay: 1.8s;"><span class="stream-prompt">&gt;</span>Plan drafted. 4 files to modify, 1 test to add.</div>
+              <div class="stream-line" style="animation-delay: 2.1s;"><span class="stream-prompt">&gt;</span>Plan complete. Duration: 42s</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="panel-label">Produced plan artifact</div>
+          <div class="card" style="height: 100%;">
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-bottom: 12px;">plan.md &middot; 1.2 KB</div>
+            <div style="font-size: 13px; line-height: 1.7; color: var(--ink-3);">
+              <strong style="color: var(--ink-5);">Plan: Enforce simple-object rule in production</strong><br /><br />
+              1. <strong>Modify</strong> <code>packages/react-server/src/ReactFlightServer.js</code><br />
+              &nbsp;&nbsp;&nbsp;- Move the DEV-only <code>simpleObject</code> check (line 142) into the shared serialization path.<br />
+              &nbsp;&nbsp;&nbsp;- Ensure the check runs in both __DEV__ and production builds.<br /><br />
+              2. <strong>Update</strong> <code>packages/react-server/npm/index.js</code><br />
+              &nbsp;&nbsp;&nbsp;- Export the new validation helper if needed by downstream consumers.<br /><br />
+              3. <strong>Add test</strong> <code>packages/react-server/src/__tests__/Flight-test.js</code><br />
+              &nbsp;&nbsp;&nbsp;- Assert that a complex object throws in production mode.<br /><br />
+              4. <strong>Run</strong> <code>npm test -- Flight-test</code> to verify.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="plan-agent2" class="tab-panel" style="display: none;">
+      <div class="split-panel">
+        <div>
+          <div class="panel-label"><span class="live-pip"></span>Agent 2 stream &middot; anthropic/claude-4</div>
+          <div class="shell">
+            <div class="shell-header">
+              <div class="shell-dot red"></div>
+              <div class="shell-dot yellow"></div>
+              <div class="shell-dot green"></div>
+              <span class="shell-title">plan-only</span>
+            </div>
+            <div class="shell-body">
+              <div class="stream-line" style="animation-delay: 0s;"><span class="stream-prompt">&gt;</span>Scanning issue for keywords...</div>
+              <div class="stream-line" style="animation-delay: 0.3s;"><span class="stream-prompt">&gt;</span>Keyword "simple object" maps to simpleObject check.</div>
+              <div class="stream-line" style="animation-delay: 0.6s;"><span class="stream-prompt">&gt;</span>Reading ReactFlightServer.js dev/prod branches...</div>
+              <div class="stream-line" style="animation-delay: 0.9s;"><span class="stream-prompt">&gt;</span>Found conditional: <code>if (__DEV__) { checkSimpleObject(...); }</code></div>
+              <div class="stream-line" style="animation-delay: 1.2s;"><span class="stream-prompt">&gt;</span>Strategy: extract check into shared helper, call unconditionally.</div>
+              <div class="stream-line" style="animation-delay: 1.5s;"><span class="stream-prompt">&gt;</span>Plan drafted. 2 files to modify, 1 test to add.</div>
+              <div class="stream-line" style="animation-delay: 1.8s;"><span class="stream-prompt">&gt;</span>Plan complete. Duration: 38s</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="panel-label">Produced plan artifact</div>
+          <div class="card" style="height: 100%;">
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-bottom: 12px;">plan.md &middot; 0.9 KB</div>
+            <div style="font-size: 13px; line-height: 1.7; color: var(--ink-3);">
+              <strong style="color: var(--ink-5);">Plan: Mirror DEV simpleObject check in prod</strong><br /><br />
+              1. <strong>Extract</strong> <code>checkSimpleObject</code> from the DEV block in ReactFlightServer.js.<br />
+              &nbsp;&nbsp;&nbsp;- Place it in a shared utility or call unconditionally before serialization.<br /><br />
+              2. <strong>Update</strong> test to assert the error in production.<br /><br />
+              3. <strong>Verify</strong> with existing test suite.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="plan-diff" class="tab-panel" style="display: none;">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Gold diff &middot; PR #27502</div>
+          <span class="badge badge-info">+142 −38</span>
+        </div>
+        <div class="diff2">
+          <div class="diff2-line diff2-header">
+            <div class="diff2-gutter"></div>
+            <div>packages/react-server/src/ReactFlightServer.js</div>
+          </div>
+          <div class="diff2-line diff2-ctx">
+            <div class="diff2-gutter">140</div>
+            <div>function serializeModel(response, model) {</div>
+          </div>
+          <div class="diff2-line diff2-minus">
+            <div class="diff2-gutter">141</div>
+            <div>-  if (__DEV__) {</div>
+          </div>
+          <div class="diff2-line diff2-minus">
+            <div class="diff2-gutter">142</div>
+            <div>-    checkSimpleObject(model);</div>
+          </div>
+          <div class="diff2-line diff2-minus">
+            <div class="diff2-gutter">143</div>
+            <div>-  }</div>
+          </div>
+          <div class="diff2-line diff2-plus">
+            <div class="diff2-gutter">141</div>
+            <div>+  checkSimpleObject(model);</div>
+          </div>
+          <div class="diff2-line diff2-ctx">
+            <div class="diff2-gutter">142</div>
+            <div>   return emitModelChunk(response, model);</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="plan-score" class="tab-panel" style="display: none;">
+      <div class="grid-2">
+        <div class="card anim-scaleIn">
+          <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 20px;">
+            <div style="width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #6366f1, #818cf8); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 16px; font-weight: 600; color: #fff;">A1</div>
+            <div>
+              <div style="font-weight: 500;">Agent 1: Planner-Heavy</div>
+              <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">openai/gpt-5.4-mini</div>
+            </div>
+            <div style="margin-left: auto;">
+              <div class="score-pill">
+                <div class="score-ring"></div>
+                8.2 / 10
+              </div>
+            </div>
+          </div>
+          <div style="font-size: 13px; color: var(--ink-2); line-height: 1.7;">
+            <strong>Correctness:</strong> Accurately identified the DEV-only check and proposed moving it to the shared path. Correct files identified.<br /><br />
+            <strong>Completeness:</strong> Mentioned 4 files but only 2 were actually modified in the gold diff. Slightly over-specified.<br /><br />
+            <strong>Safety:</strong> No destructive operations proposed. Test-driven verification included.<br /><br />
+            <em style="color: var(--ink-1);">Graded by claude-4-grading-model &middot; 2.3s</em>
+          </div>
+        </div>
+        <div class="card anim-scaleIn delay-2">
+          <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 20px;">
+            <div style="width: 48px; height: 48px; border-radius: 50%; background: linear-gradient(135deg, #f59e0b, #fbbf24); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 16px; font-weight: 600; color: #fff;">A2</div>
+            <div>
+              <div style="font-weight: 500;">Agent 2: End-to-End</div>
+              <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">anthropic/claude-4</div>
+            </div>
+            <div style="margin-left: auto;">
+              <div class="score-pill">
+                <div class="score-ring"></div>
+                9.1 / 10
+              </div>
+            </div>
+          </div>
+          <div style="font-size: 13px; color: var(--ink-2); line-height: 1.7;">
+            <strong>Correctness:</strong> Precisely identified the conditional extraction strategy. Matches gold diff closely.<br /><br />
+            <strong>Completeness:</strong> Only proposed necessary changes. No extraneous files.<br /><br />
+            <strong>Safety:</strong> Conservative approach. Reuses existing helper.<br /><br />
+            <em style="color: var(--ink-1);">Graded by claude-4-grading-model &middot; 2.1s</em>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 5: GRADING — IMPLEMENTATION -->
+  <section class="section">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">5</div>
+      <div class="section-title">Grading &middot; Stage 2: Implementation</div>
+    </div>
+
+    <div class="tab-bar anim-fadeUp delay-1">
+      <button class="tab-btn active" onclick="switchTab(this, 'impl-stream')">Live stream</button>
+      <button class="tab-btn" onclick="switchTab(this, 'impl-tests')">Test results</button>
+      <button class="tab-btn" onclick="switchTab(this, 'impl-diff')">Diff compare</button>
+      <button class="tab-btn" onclick="switchTab(this, 'impl-judge')">Grader verdict</button>
+    </div>
+
+    <div id="impl-stream" class="tab-panel anim-fadeUp delay-2">
+      <div class="split-panel">
+        <div>
+          <div class="panel-label"><span class="live-pip"></span>Agent 1 implementation</div>
+          <div class="shell">
+            <div class="shell-header">
+              <div class="shell-dot red"></div>
+              <div class="shell-dot yellow"></div>
+              <div class="shell-dot green"></div>
+              <span class="shell-title">pi-harness &middot; openai/gpt-5.4-mini</span>
+            </div>
+            <div class="shell-body" id="impl-stream-1">
+              <div class="stream-line" style="animation-delay: 0s;"><span class="stream-prompt">$</span>git clone --depth 1 https://github.com/facebook/react.git worktree/base</div>
+              <div class="stream-line" style="animation-delay: 0.3s;"><span class="out ok">Cloning into 'worktree/base'...</span></div>
+              <div class="stream-line" style="animation-delay: 0.6s;"><span class="stream-prompt">$</span>cd worktree/base && npm ci</div>
+              <div class="stream-line" style="animation-delay: 0.9s;"><span class="out">added 2,847 packages in 18.2s</span></div>
+              <div class="stream-line" style="animation-delay: 1.2s;"><span class="stream-prompt">$</span>cat &gt; packages/react-server/src/ReactFlightServer.js.patch &lt;&lt; 'EOF'</div>
+              <div class="stream-line" style="animation-delay: 1.5s;"><span class="out dim">...patch content...</span></div>
+              <div class="stream-line" style="animation-delay: 1.8s;"><span class="stream-prompt">$</span>git apply ReactFlightServer.js.patch</div>
+              <div class="stream-line" style="animation-delay: 2.1s;"><span class="out ok">Applied cleanly</span></div>
+              <div class="stream-line" style="animation-delay: 2.4s;"><span class="stream-prompt">$</span>npm test -- Flight-test</div>
+              <div class="stream-line" style="animation-delay: 2.7s;"><span class="out ok">PASS packages/react-server/src/__tests__/Flight-test.js</span></div>
+              <div class="stream-line" style="animation-delay: 3.0s;"><span class="out ok">Test Suites: 1 passed, 1 total</span></div>
+              <div class="stream-line" style="animation-delay: 3.3s;"><span class="out ok">Implementation complete. 2 files changed.</span></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="panel-label"><span class="live-pip" style="background: var(--warn); animation-delay: 0.5s;"></span>Agent 2 implementation</div>
+          <div class="shell">
+            <div class="shell-header">
+              <div class="shell-dot red"></div>
+              <div class="shell-dot yellow"></div>
+              <div class="shell-dot green"></div>
+              <span class="shell-title">pi-harness &middot; anthropic/claude-4</span>
+            </div>
+            <div class="shell-body" id="impl-stream-2">
+              <div class="stream-line" style="animation-delay: 0s;"><span class="stream-prompt">$</span>git clone --depth 1 https://github.com/facebook/react.git worktree/base</div>
+              <div class="stream-line" style="animation-delay: 0.3s;"><span class="out ok">Cloning into 'worktree/base'...</span></div>
+              <div class="stream-line" style="animation-delay: 0.6s;"><span class="stream-prompt">$</span>cd worktree/base && npm ci</div>
+              <div class="stream-line" style="animation-delay: 0.9s;"><span class="out">added 2,847 packages in 17.8s</span></div>
+              <div class="stream-line" style="animation-delay: 1.2s;"><span class="stream-prompt">$</span>sed -i 's/if (__DEV__) {/\/\/ DEV guard removed/' ReactFlightServer.js</div>
+              <div class="stream-line" style="animation-delay: 1.5s;"><span class="out ok">Modified ReactFlightServer.js</span></div>
+              <div class="stream-line" style="animation-delay: 1.8s;"><span class="stream-prompt">$</span>npm test -- Flight-test</div>
+              <div class="stream-line" style="animation-delay: 2.1s;"><span class="out ok">PASS packages/react-server/src/__tests__/Flight-test.js</span></div>
+              <div class="stream-line" style="animation-delay: 2.4s;"><span class="stream-prompt">$</span>npm test -- FlightSerializer-test</div>
+              <div class="stream-line" style="animation-delay: 2.7s;"><span class="out err">FAIL packages/react-server/src/__tests__/FlightSerializer-test.js</span></div>
+              <div class="stream-line" style="animation-delay: 3.0s;"><span class="out err">  ● should preserve backward compatibility</span></div>
+              <div class="stream-line" style="animation-delay: 3.3s;"><span class="out err">    Expected value to equal: "simple"</span></div>
+              <div class="stream-line" style="animation-delay: 3.6s;"><span class="out err">    Received: "complex"</span></div>
+              <div class="stream-line" style="animation-delay: 3.9s;"><span class="out dim">Retrying with refined patch...</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="impl-tests" class="tab-panel" style="display: none;">
+      <div class="grid-2">
+        <div class="card anim-scaleIn">
+          <div class="card-header">
+            <div class="card-title">Agent 1 &middot; Test results</div>
+            <span class="badge badge-success">All pass</span>
+          </div>
+          <table class="mdl-table">
+            <thead>
+              <tr><th>Test</th><th>Base</th><th>Patch</th><th>Gold</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Flight-test.js &middot; fail-to-pass</td>
+                <td style="color: var(--error);">&#10007; FAIL</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+              </tr>
+              <tr>
+                <td>FlightSerializer-test.js &middot; pass-to-pass</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+              </tr>
+            </tbody>
+          </table>
+          <div style="margin-top: 16px; text-align: center;">
+            <div style="font-family: var(--font-serif); font-size: 36px; color: var(--success);">Resolved</div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">SWE-bench score: 1.0</div>
+          </div>
+        </div>
+        <div class="card anim-scaleIn delay-2">
+          <div class="card-header">
+            <div class="card-title">Agent 2 &middot; Test results</div>
+            <span class="badge badge-warn">1 failure</span>
+          </div>
+          <table class="mdl-table">
+            <thead>
+              <tr><th>Test</th><th>Base</th><th>Patch</th><th>Gold</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Flight-test.js &middot; fail-to-pass</td>
+                <td style="color: var(--error);">&#10007; FAIL</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+              </tr>
+              <tr>
+                <td>FlightSerializer-test.js &middot; pass-to-pass</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+                <td style="color: var(--error);">&#10007; FAIL</td>
+                <td style="color: var(--success);">&#10003; PASS</td>
+              </tr>
+            </tbody>
+          </table>
+          <div style="margin-top: 16px; text-align: center;">
+            <div style="font-family: var(--font-serif); font-size: 36px; color: var(--error);">Not resolved</div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1);">SWE-bench score: 0.0</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="impl-diff" class="tab-panel" style="display: none;">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Agent 1 diff</div>
+            <span class="badge badge-info">+18 −6</span>
+          </div>
+          <div class="diff2" style="font-size: 11px;">
+            <div class="diff2-line diff2-header">
+              <div class="diff2-gutter"></div>
+              <div>ReactFlightServer.js</div>
+            </div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">141</div><div>-  if (__DEV__) {</div></div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">142</div><div>-    checkSimpleObject(model);</div></div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">143</div><div>-  }</div></div>
+            <div class="diff2-line diff2-plus"><div class="diff2-gutter">141</div><div>+  checkSimpleObject(model);</div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Agent 2 diff</div>
+            <span class="badge badge-info">+12 −8</span>
+          </div>
+          <div class="diff2" style="font-size: 11px;">
+            <div class="diff2-line diff2-header">
+              <div class="diff2-gutter"></div>
+              <div>ReactFlightServer.js</div>
+            </div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">141</div><div>-  if (__DEV__) {</div></div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">142</div><div>-    checkSimpleObject(model);</div></div>
+            <div class="diff2-line diff2-minus"><div class="diff2-gutter">143</div><div>-  }</div></div>
+            <div class="diff2-line diff2-plus"><div class="diff2-gutter">141</div><div>+  if (typeof model === 'object') {</div></div>
+            <div class="diff2-line diff2-plus"><div class="diff2-gutter">142</div><div>+    checkSimpleObject(model);</div></div>
+            <div class="diff2-line diff2-plus"><div class="diff2-gutter">143</div><div>+  }</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="impl-judge" class="tab-panel" style="display: none;">
+      <div class="card anim-scaleIn">
+        <div class="card-header">
+          <div class="card-title">External grader verdict</div>
+          <span class="badge badge-success">Complete</span>
+        </div>
+        <div style="display: flex; gap: 24px; align-items: flex-start;">
+          <div style="flex: 1; padding: 20px; background: var(--accent-wash); border-radius: 10px;">
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-bottom: 8px;">AGENT 1 &middot; openai/gpt-5.4-mini</div>
+            <div style="font-size: 14px; line-height: 1.7;">
+              The patch correctly removes the DEV guard and unconditionally calls <code>checkSimpleObject</code>. This is the minimal, correct fix. Tests pass. The diff closely matches the gold PR.
+            </div>
+            <div style="margin-top: 12px; display: flex; gap: 8px;">
+              <span class="badge badge-success">Correct fix</span>
+              <span class="badge badge-success">Minimal diff</span>
+              <span class="badge badge-success">Tests pass</span>
+            </div>
+          </div>
+          <div style="font-family: var(--font-serif); font-size: 48px; color: var(--ink-1); align-self: center;">vs</div>
+          <div style="flex: 1; padding: 20px; background: var(--rule-1); border-radius: 10px;">
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-bottom: 8px;">AGENT 2 &middot; anthropic/claude-4</div>
+            <div style="font-size: 14px; line-height: 1.7;">
+              The patch adds an unnecessary <code>typeof</code> check that was not in the gold PR. While the core fix is directionally correct, the extra condition changes behavior for non-object inputs and breaks backward compatibility tests.
+            </div>
+            <div style="margin-top: 12px; display: flex; gap: 8px;">
+              <span class="badge badge-warn">Over-engineered</span>
+              <span class="badge badge-warn">Regression</span>
+              <span class="badge badge-success">Core fix correct</span>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top: 20px; text-align: center; padding: 16px; background: var(--accent-wash); border-radius: 10px;">
+          <div style="font-family: var(--font-serif); font-size: 24px; color: var(--accent);">
+            Winner: <strong>Agent 1</strong> (openai/gpt-5.4-mini)
+          </div>
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--ink-1); margin-top: 4px;">
+            Graded by claude-4-judge &middot; reasoning: 312 tokens
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 6: ARTIFACTS -->
+  <section class="section">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">6</div>
+      <div class="section-title">Produced artifacts</div>
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <div class="panel-label">Agent 1 artifacts</div>
+        <div class="artifact-grid">
+          <div class="artifact-tile anim-fadeUp delay-1">
+            <div class="icon">&#128196;</div>
+            <div class="name">plan.md</div>
+            <div class="meta">1.2 KB &middot; 42s</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-2">
+            <div class="icon">&#128190;</div>
+            <div class="name">session-log.json</div>
+            <div class="meta">18.4 KB &middot; 247 events</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-3">
+            <div class="icon">&#128203;</div>
+            <div class="name">patch.diff</div>
+            <div class="meta">+18 −6 &middot; applied cleanly</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-4">
+            <div class="icon">&#128202;</div>
+            <div class="name">test-results.json</div>
+            <div class="meta">2 tests &middot; all pass</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-5">
+            <div class="icon">&#128221;</div>
+            <div class="name">plan-score.md</div>
+            <div class="meta">8.2/10 &middot; claude-4-grader</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="panel-label">Agent 2 artifacts</div>
+        <div class="artifact-grid">
+          <div class="artifact-tile anim-fadeUp delay-1">
+            <div class="icon">&#128196;</div>
+            <div class="name">plan.md</div>
+            <div class="meta">0.9 KB &middot; 38s</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-2">
+            <div class="icon">&#128190;</div>
+            <div class="name">session-log.json</div>
+            <div class="meta">16.1 KB &middot; 198 events</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-3">
+            <div class="icon">&#128203;</div>
+            <div class="name">patch.diff</div>
+            <div class="meta">+12 −8 &middot; 1 test fail</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-4">
+            <div class="icon">&#128202;</div>
+            <div class="name">test-results.json</div>
+            <div class="meta">2 tests &middot; 1 fail</div>
+          </div>
+          <div class="artifact-tile anim-fadeUp delay-5">
+            <div class="icon">&#128221;</div>
+            <div class="name">plan-score.md</div>
+            <div class="meta">9.1/10 &middot; claude-4-grader</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 7: FINAL RESULTS / PODIUM -->
+  <section class="section" id="results">
+    <div class="section-header anim-fadeUp">
+      <div class="section-num">7</div>
+      <div class="section-title">Final results &middot; Task 1 of 3</div>
+    </div>
+
+    <div class="podium" id="podium">
+      <div class="podium-block" style="order: 2;">
+        <div class="podium-avatar gold">A1</div>
+        <div class="podium-bar gold">
+          <div class="podium-rank">1</div>
+          <div class="podium-score">8.7</div>
+          <div class="podium-name">Planner-Heavy</div>
+          <div class="podium-model">gpt-5.4-mini</div>
+        </div>
+      </div>
+      <div class="podium-block" style="order: 1;">
+        <div class="podium-avatar silver">A2</div>
+        <div class="podium-bar silver">
+          <div class="podium-rank">2</div>
+          <div class="podium-score">7.2</div>
+          <div class="podium-name">End-to-End</div>
+          <div class="podium-model">claude-4</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card anim-fadeUp delay-3" style="max-width: 720px; margin: 0 auto;">
+      <div class="card-header">
+        <div class="card-title">Aggregate score breakdown</div>
+        <span class="badge badge-info">Task 1/3</span>
+      </div>
+      <table class="mdl-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>Plan score</th>
+            <th>Impl. score</th>
+            <th>Tests</th>
+            <th>Grader</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="repo-dot"></span>Agent 1 &middot; gpt-5.4-mini</td>
+            <td>8.2</td>
+            <td>9.0</td>
+            <td><span style="color: var(--success);">&#10003; Resolved</span></td>
+            <td><span style="color: var(--success);">Winner</span></td>
+            <td><strong>8.7</strong></td>
+          </tr>
+          <tr>
+            <td><span class="repo-dot" style="background: #f59e0b;"></span>Agent 2 &middot; claude-4</td>
+            <td>9.1</td>
+            <td>6.5</td>
+            <td><span style="color: var(--error);">&#10007; Not resolved</span></td>
+            <td><span style="color: var(--error);">Runner-up</span></td>
+            <td><strong>7.2</strong></td>
+          </tr>
+        </tbody>
+      </table>
+      <div style="margin-top: 16px; font-size: 12px; color: var(--ink-1); text-align: center;">
+        Total = 0.4 &#215; plan + 0.4 &#215; impl + 0.1 &#215; tests + 0.1 &#215; grader preference
+      </div>
+    </div>
+
+    <div style="text-align: center; margin-top: 32px;">
+      <button onclick="fireConfetti()" style="font-family: var(--font-sans); font-size: 14px; font-weight: 500; padding: 12px 28px; border-radius: 8px; border: none; background: var(--accent); color: #fff; cursor: pointer; transition: all 0.2s;">
+        &#127881; Celebrate &amp; continue to Task 2
+      </button>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div style="font-family: var(--font-mono); font-size: 11px; margin-bottom: 8px;">Pi Lab &middot; Benchmark Console</div>
+    <div>Goal mock rendered for alignment. Not real data.</div>
+  </div>
+
+  <script>
+    // Tab switching
+    function switchTab(btn, panelId) {
+      const container = btn.closest('.section');
+      container.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      container.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+      document.getElementById(panelId).style.display = 'block';
+      document.getElementById(panelId).classList.add('anim-fadeUp');
+    }
+
+    // Confetti
+    function fireConfetti() {
+      const colors = ['#6366f1', '#fbbf24', '#22c55e', '#ef4444', '#a5b4fc', '#f59e0b'];
+      for (let i = 0; i < 60; i++) {
+        const el = document.createElement('div');
+        el.className = 'confetti-piece';
+        el.style.left = Math.random() * 100 + 'vw';
+        el.style.top = '100vh';
+        el.style.background = colors[Math.floor(Math.random() * colors.length)];
+        el.style.animationDuration = (2 + Math.random() * 2) + 's';
+        el.style.animationDelay = (Math.random() * 0.5) + 's';
+        el.style.transform = `rotate(${Math.random() * 360}deg)`;
+        document.body.appendChild(el);
+        setTimeout(() => el.remove(), 5000);
+      }
+    }
+
+    // Scroll reveal
+    const reveals = document.querySelectorAll('.reveal');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+        }
+      });
+    }, { threshold: 0.1 });
+    reveals.forEach(el => observer.observe(el));
+
+    // Auto-fire confetti when podium scrolls into view
+    let confettiFired = false;
+    const podiumObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting && !confettiFired) {
+          confettiFired = true;
+          setTimeout(fireConfetti, 800);
+        }
+      });
+    }, { threshold: 0.5 });
+    const podiumEl = document.getElementById('podium');
+    if (podiumEl) podiumObserver.observe(podiumEl);
+  </script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+ALTER TABLE "validation_attempts" DROP CONSTRAINT "validation_attempts_previous_attempt_id_validation_attempts_id_fk";

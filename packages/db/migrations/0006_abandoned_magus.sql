@@ -1,0 +1,1 @@
+ALTER TABLE "reproduction_steps" ADD COLUMN "metadata" jsonb DEFAULT '{}'::jsonb NOT NULL;

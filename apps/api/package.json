@@ -1,0 +1,28 @@
+{
+  "name": "@pilab/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch --env-file=../../.env src/server.ts",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.2.0",
+    "@pilab/db": "workspace:*",
+    "@pilab/github": "workspace:*",
+    "@pilab/jobs": "workspace:*",
+    "@pilab/object-store": "workspace:*",
+    "drizzle-orm": "^0.45.1",
+    "fastify": "^5.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
