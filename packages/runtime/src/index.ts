@@ -31,7 +31,7 @@ export type RuntimeWorkspace = {
 };
 
 export type RuntimeProvider = {
-  kind: "daytona";
+  kind: "daytona" | "e2b";
   createWorkspace(input: {
     id: string;
     env?: Record<string, string>;
@@ -73,8 +73,13 @@ export function readDaytonaRuntimeConfig(env: NodeJS.ProcessEnv = process.env): 
   };
 }
 
-export function createBenchmarkRuntime(config = readDaytonaRuntimeConfig()): RuntimeProvider {
-  return createDaytonaRuntime(config);
+export function createBenchmarkRuntime(): RuntimeProvider {
+  // Default to E2B; fall back to Daytona if E2B_API_KEY is not set but DAYTONA_API_KEY is.
+  const e2bKey = process.env.E2B_API_KEY;
+  if (e2bKey) return createE2BRuntime();
+  const daytonaKey = process.env.DAYTONA_API_KEY;
+  if (daytonaKey) return createDaytonaRuntime(readDaytonaRuntimeConfig());
+  throw new Error("Either E2B_API_KEY or DAYTONA_API_KEY must be set.");
 }
 
 export function createDaytonaRuntime(config: RuntimeConfig): RuntimeProvider {
@@ -112,9 +117,6 @@ export function createDaytonaRuntime(config: RuntimeConfig): RuntimeProvider {
 
       const rootPath = "/home/daytona/workspace";
       const workspace = createDaytonaWorkspace({ sandbox, id: input.id, rootPath });
-      // Override DNS to use reliable public resolvers; Docker's embedded DNS (127.0.0.11)
-      // can be unreliable when the host's DNS is flaky. Docker won't overwrite /etc/resolv.conf
-      // once it has been modified from the original.
       const init = await workspace.run({
         command: `printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\noptions edns0 trust-ad ndots:0\\n' > /etc/resolv.conf && mkdir -p ${shellQuote(rootPath)}`,
         cwd: "/",
@@ -125,6 +127,91 @@ export function createDaytonaRuntime(config: RuntimeConfig): RuntimeProvider {
         throw new Error(`Failed to initialize Daytona workspace: ${init.stderr || init.stdout || `exit ${init.exitCode}`}`);
       }
       return workspace;
+    },
+  };
+}
+
+/**
+ * Create a runtime provider backed by E2B cloud sandboxes.
+ * Requires the `E2B_API_KEY` environment variable.
+ *
+ * E2B provides reliable cloud sandboxes with native stderr support and
+ * a robust gRPC-based API — no DNS workarounds needed.
+ */
+export function createE2BRuntime(): RuntimeProvider {
+  const apiKey = process.env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY is required. Get one at https://e2b.dev/dashboard");
+
+  return {
+    kind: "e2b",
+    async createWorkspace(input): Promise<RuntimeWorkspace> {
+      const e2bModule = await import("e2b");
+      const Sandbox = e2bModule.Sandbox ?? e2bModule.default;
+
+      const s = await Sandbox.create({
+        ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}),
+        ...(input.env ? { envs: { CI: "true", ...input.env } } : { envs: { CI: "true" } }),
+      });
+
+      return createE2BWorkspace(s);
+    },
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
+  const id = sandbox.sandboxId;
+  const rootPath = "/home/user";  // E2B sandbox default working directory
+
+  return {
+    id,
+    rootPath,
+    async run(commandInput) {
+      const { exitCode, stdout, stderr, error } = await sandbox.commands.run(commandInput.command, {
+        cwd: commandInput.cwd ?? rootPath,
+        ...(commandInput.env ? { envs: commandInput.env } : {}),
+        timeoutMs: commandInput.timeoutMs,
+      });
+      return {
+        exitCode: exitCode ?? (error ? 1 : 0),
+        stdout: stdout ?? "",
+        stderr: stderr ?? error ?? "",
+        timedOut: false,
+      };
+    },
+    async runStreaming(commandInput) {
+      let fullStdout = "";
+      let fullStderr = "";
+
+      const { exitCode, stdout, stderr, error } = await sandbox.commands.run(commandInput.command, {
+        cwd: commandInput.cwd ?? rootPath,
+        ...(commandInput.env ? { envs: commandInput.env } : {}),
+        timeoutMs: commandInput.timeoutMs,
+        onStdout(chunk: string) {
+          fullStdout += chunk;
+          commandInput.onStdout?.(chunk);
+        },
+        onStderr(chunk: string) {
+          fullStderr += chunk;
+          commandInput.onStderr?.(chunk);
+        },
+      });
+
+      return {
+        exitCode: exitCode ?? (error ? 1 : 0),
+        stdout: fullStdout || stdout || "",
+        stderr: fullStderr || stderr || error || "",
+        timedOut: false,
+      };
+    },
+    async writeFile(fileInput) {
+      await sandbox.files.write(fileInput.path, fileInput.content);
+    },
+    async readFile(filePath) {
+      return sandbox.files.read(filePath, { format: "text" });
+    },
+    async delete() {
+      await sandbox.kill();
     },
   };
 }
