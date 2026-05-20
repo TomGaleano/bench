@@ -7,6 +7,8 @@ import {
   createRedisConnection,
   createValidationRunnerWorker,
   validationRunnerQueueName,
+  type ValidationRunnerJobData,
+  type ValidationRunnerJobResult,
 } from "@pilab/jobs";
 
 import {
@@ -42,6 +44,7 @@ const processor = createValidationRunnerProcessor({
 const worker = createValidationRunnerWorker({
   connection,
   processor,
+  concurrency: 3,
 });
 
 const caseBuilderQueue = createCaseBuilderQueue({ connection });
@@ -50,11 +53,11 @@ worker.on("ready", () => {
   console.log(`[validation-runner] worker ready for queue ${validationRunnerQueueName}`);
 });
 
-worker.on("active", (job) => {
+worker.on("active", (job: { id?: string }) => {
   console.log(`[validation-runner] started job ${job.id ?? "(unknown)"}`);
 });
 
-worker.on("completed", async (job, result) => {
+worker.on("completed", async (job: { id?: string; data: ValidationRunnerJobData }, result: ValidationRunnerJobResult) => {
   console.log(
     `[validation-runner] completed job ${job.id ?? "(unknown)"} with status ${result.status}`,
   );
@@ -70,7 +73,7 @@ worker.on("completed", async (job, result) => {
   }
 });
 
-worker.on("failed", async (job, error) => {
+worker.on("failed", async (job: { id?: string; data: ValidationRunnerJobData } | undefined, error: Error) => {
   console.error(
     `[validation-runner] failed job ${job?.id ?? "(unknown)"}: ${error.message}`,
   );
@@ -88,7 +91,7 @@ worker.on("failed", async (job, error) => {
   }
 });
 
-worker.on("error", (error) => {
+worker.on("error", (error: Error) => {
   console.error(`[validation-runner] worker error: ${error.message}`);
 });
 

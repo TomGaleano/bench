@@ -2817,6 +2817,29 @@ tr:last-child td {
   white-space: pre-wrap;
 }
 
+.wz-info {
+  background: #eef6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-top: 18px;
+  padding: 16px 18px;
+}
+
+.wz-info strong {
+  color: var(--cool);
+}
+
+.wz-info code {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 1px 5px;
+}
+
 .wz-card {
   background: var(--paper);
   border: 1px solid var(--rule);

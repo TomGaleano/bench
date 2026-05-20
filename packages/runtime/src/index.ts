@@ -36,6 +36,7 @@ export type RuntimeProvider = {
     id: string;
     env?: Record<string, string>;
     timeoutMs: number;
+    image?: string;
   }): Promise<RuntimeWorkspace>;
 };
 
@@ -91,8 +92,10 @@ export function createDaytonaRuntime(config: RuntimeConfig): RuntimeProvider {
       if (config.cpu !== undefined) resources.cpu = config.cpu;
       if (config.memoryGb !== undefined) resources.memory = config.memoryGb;
       if (config.diskGb !== undefined) resources.disk = config.diskGb;
+      const resolvedImage = input.image ?? config.image ?? Image.base(config.baseImage ?? "node:22-bookworm");
       const createParams = {
-        image: config.image ?? Image.base(config.baseImage ?? "node:22-bookworm"),
+        name: input.id,
+        image: resolvedImage,
         ...(!config.image ? { language: config.language } : {}),
         ephemeral: true,
         autoStopInterval: config.autoStopMinutes,
@@ -109,8 +112,11 @@ export function createDaytonaRuntime(config: RuntimeConfig): RuntimeProvider {
 
       const rootPath = "/home/daytona/workspace";
       const workspace = createDaytonaWorkspace({ sandbox, id: input.id, rootPath });
+      // Override DNS to use reliable public resolvers; Docker's embedded DNS (127.0.0.11)
+      // can be unreliable when the host's DNS is flaky. Docker won't overwrite /etc/resolv.conf
+      // once it has been modified from the original.
       const init = await workspace.run({
-        command: `mkdir -p ${shellQuote(rootPath)}`,
+        command: `printf 'nameserver 8.8.8.8\\nnameserver 1.1.1.1\\noptions edns0 trust-ad ndots:0\\n' > /etc/resolv.conf && mkdir -p ${shellQuote(rootPath)}`,
         cwd: "/",
         timeoutMs: input.timeoutMs,
       });
@@ -130,31 +136,65 @@ export async function cloneRepoAtCommitInRuntime(input: {
   commitSha: string;
   timeoutMs: number;
   env?: Record<string, string>;
+  image?: string;
 }): Promise<RuntimeWorkspace> {
-  const workspaceInput: { id: string; timeoutMs: number; env?: Record<string, string> } = {
+  const workspaceInput: { id: string; timeoutMs: number; env?: Record<string, string>; image?: string } = {
     id: input.workspaceId,
     timeoutMs: input.timeoutMs,
   };
   if (input.env) workspaceInput.env = input.env;
+  if (input.image) workspaceInput.image = input.image;
   const workspace = await input.runtime.createWorkspace(workspaceInput);
 
-  try {
-    const command = [
-      "set -euo pipefail",
-      `git init ${shellQuote(workspace.rootPath)}`,
-      `git -C ${shellQuote(workspace.rootPath)} remote add origin ${shellQuote(input.repoUrl)}`,
-      `git -C ${shellQuote(workspace.rootPath)} fetch --depth=1 origin ${shellQuote(input.commitSha)}`,
-      `git -C ${shellQuote(workspace.rootPath)} checkout --detach FETCH_HEAD`,
-    ].join(" && ");
-    const result = await workspace.run({ command, timeoutMs: input.timeoutMs });
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr || result.stdout || `git checkout failed with exit ${result.exitCode}`);
+  const maxRetries = 5;
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // On retry, if the working tree is dirty from a prior failed fetch, reset it first
+      const resetCmd = attempt > 1 ? `cd ${shellQuote(workspace.rootPath)} && git reset --hard HEAD 2>/dev/null; true && ` : "";
+      // remote add is idempotent: if origin already exists (from a prior retry), set-url instead
+      const command = [
+        "set -euo pipefail",
+        `${resetCmd}git init ${shellQuote(workspace.rootPath)}`,
+        `git -C ${shellQuote(workspace.rootPath)} remote add origin ${shellQuote(input.repoUrl)} 2>/dev/null || git -C ${shellQuote(workspace.rootPath)} remote set-url origin ${shellQuote(input.repoUrl)}`,
+        `git -C ${shellQuote(workspace.rootPath)} fetch --depth=1 origin ${shellQuote(input.commitSha)}`,
+        `git -C ${shellQuote(workspace.rootPath)} checkout --detach FETCH_HEAD`,
+      ].join(" && ");
+      const result = await workspace.run({ command, timeoutMs: input.timeoutMs });
+      if (result.exitCode !== 0) {
+        const isRetryable =
+          attempt < maxRetries &&
+          (result.stderr.includes("Could not resolve host") ||
+            result.stderr.includes("Name or service not known") ||
+            result.stderr.includes("Temporary failure") ||
+            result.stderr.includes("timed out") ||
+            result.stderr.includes("Connection reset") ||
+            result.stderr.includes("SSL") ||
+            result.stderr.includes("remote origin already exists"));
+        if (isRetryable) {
+          lastError = new Error(result.stderr || result.stdout || `git checkout failed with exit ${result.exitCode}`);
+          // Exponential backoff: 2s, 4s, 8s, 16s
+          await delay(2_000 * Math.pow(2, attempt - 1));
+          continue;
+        }
+        throw new Error(result.stderr || result.stdout || `git checkout failed with exit ${result.exitCode}`);
+      }
+      return workspace;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < maxRetries) {
+        // Retry on any error with exponential backoff
+        await delay(2_000 * Math.pow(2, attempt - 1));
+        continue;
+      }
+      await workspace.delete().catch(() => undefined);
+      throw lastError;
     }
-    return workspace;
-  } catch (error) {
-    await workspace.delete().catch(() => undefined);
-    throw error;
   }
+
+  await workspace.delete().catch(() => undefined);
+  throw lastError ?? new Error("cloneRepoAtCommitInRuntime failed after all retries");
 }
 
 export function assertSafeRelativePath(filePath: string): void {
@@ -202,26 +242,69 @@ function createDaytonaWorkspace(input: {
     id: input.id,
     rootPath: input.rootPath,
     async run(commandInput) {
+      // Use session commands so stderr is captured (executeCommand drops stderr).
+      const sessionId = `pilab-${input.id}-${Date.now().toString(36)}-run`.replace(/[^a-zA-Z0-9_-]/g, "-");
+      let stdout = "";
+      let stderr = "";
       try {
-        const response = await sandbox.process.executeCommand(
-          commandInput.command,
-          commandInput.cwd ?? input.rootPath,
-          commandInput.env,
+        await sandbox.process.createSession(sessionId);
+        const envPrefix = commandInput.env
+          ? `${Object.entries(commandInput.env)
+              .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+              .map(([key, value]) => `${key}=${shellQuote(value)}`)
+              .join(" ")} `
+          : "";
+        const commandBody = commandInput.cwd
+          ? `cd ${shellQuote(commandInput.cwd)} && ${envPrefix}${commandInput.command}`
+          : `${envPrefix}${commandInput.command}`;
+        const command = `bash -lc ${shellQuote(`set +e; ${commandBody}; __pilab_exit=$?; printf '\nPILAB_RUNTIME_EXIT_CODE=%s\n' "$__pilab_exit"; exit "$__pilab_exit"`)}`;
+        const response = await sandbox.process.executeSessionCommand(
+          sessionId,
+          { command, runAsync: true },
           Math.max(1, Math.ceil(commandInput.timeoutMs / 1000)),
         );
+        if (!response.cmdId) {
+          return {
+            exitCode: response.exitCode ?? 1,
+            stdout: response.stdout ?? response.output ?? "",
+            stderr: response.stderr ?? "Daytona did not return a session command id.",
+            timedOut: false,
+          };
+        }
+
+        const logsDone = sandbox.process.getSessionCommandLogs(
+          sessionId,
+          response.cmdId,
+          (chunk) => { stdout += chunk; },
+          (chunk) => { stderr += chunk; },
+        ).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          if (message) stderr += stderr ? `\n${message}` : message;
+        });
+        const startedAt = Date.now();
+        let completed = await sandbox.process.getSessionCommand(sessionId, response.cmdId);
+        while (completed.exitCode === undefined && Date.now() - startedAt < commandInput.timeoutMs) {
+          await delay(1_000);
+          completed = await sandbox.process.getSessionCommand(sessionId, response.cmdId);
+        }
+        await Promise.race([logsDone, delay(1_000)]);
+        const observedExitCode = parseRuntimeExitCode(stdout);
         return {
-          exitCode: response.exitCode ?? 0,
-          stdout: response.result ?? "",
-          stderr: "",
-          timedOut: false,
+          exitCode: observedExitCode ?? completed.exitCode ?? 1,
+          stdout: stripRuntimeExitCode(stdout),
+          stderr,
+          timedOut: observedExitCode === undefined && completed.exitCode === undefined,
         };
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         return {
           exitCode: 1,
-          stdout: "",
-          stderr: error instanceof Error ? error.message : String(error),
-          timedOut: /timeout|timed out/i.test(error instanceof Error ? error.message : String(error)),
+          stdout,
+          stderr: stderr || message,
+          timedOut: /timeout|timed out/i.test(message),
         };
+      } finally {
+        await sandbox.process.deleteSession(sessionId).catch(() => undefined);
       }
     },
     async runStreaming(commandInput) {

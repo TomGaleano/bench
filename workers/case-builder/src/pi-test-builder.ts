@@ -89,6 +89,15 @@ export function createPiTestBuilder(config: PiTestBuilderConfig) {
         let lastError: Error | undefined;
         let lastRawResponse: JsonValue | undefined;
 
+        // Seed the retry loop with validation runner feedback (if available) so the agent
+        // sees it as `previousError` on attempt 1 — no need to read the context file.
+        if (input.previousAttemptLogs) {
+          const formatted = formatPreviousErrorForAgent(input.previousAttemptLogs);
+          if (formatted) {
+            lastError = new Error(formatted);
+          }
+        }
+
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           try {
             const result = await runPiAgent({
@@ -227,7 +236,7 @@ async function runPiAgent(input: {
     }
   });
 
-  const prompt = buildUserPrompt(input.contextPath);
+  const prompt = buildUserPrompt(input.contextPath, input.attempt);
   console.log(`[pi-agent] Sending prompt (${prompt.length} chars)`);
 
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -299,7 +308,7 @@ function buildSystemPrompt(
     '    "kind": "fail_to_pass",',
     '    "filePath": "path/to/test.file",',
     '    "testCommand": "npm test path/to/test.file",',
-    '    "content": "full test code here",',
+    '    "content": "full test code here (include ALL necessary imports at the top)",',
     '    "rationale": "why this test validates the fix AND why it would fail on base"',
     '  }],',
     '  "notes": ["any observations about existing tests or test coverage"],',
@@ -312,6 +321,8 @@ function buildSystemPrompt(
     "- testCommand must start with: pnpm, npm, yarn, npx, node, bun, pytest, python, go test, cargo test, mvn, gradle, or ./gradlew",
     "- If existing tests were found, set existingTestsFound: true and explain in notes",
     "- Read the patch for each changed file before creating the test",
+    "- INCLUDE ALL REQUIRED IMPORTS in the test content. If you use pytest, numpy, etc. in the test code, add the import at the top.",
+    "- Make sure the test command actually matches the test file path and test function name.",
     ...(detectedTestRunner
       ? [
           "",
@@ -321,30 +332,119 @@ function buildSystemPrompt(
   ];
 
   if (attempt > 1 && previousError) {
+    const details = parsePreviousError(previousError);
     parts.push(
       "",
-      `Previous attempt failed with: ${previousError}`,
-      "Please produce a simpler, more conservative test that is more likely to be correct.",
+      "=== FEEDBACK FROM PREVIOUS ATTEMPT ===",
+      `This is retry attempt #${attempt}. The previous test was rejected.`,
+      "",
+      ...(details.testName ? [`Test name: ${details.testName}`] : []),
+      ...(details.testKind ? [`Test kind: ${details.testKind}`] : []),
+      ...(details.command ? [`Command: ${details.command}`] : []),
+      ...(details.baseExit !== undefined ? [`Base exit code: ${details.baseExit} (expected non-zero for fail_to_pass)`] : []),
+      ...(details.goldExit !== undefined ? [`Gold exit code: ${details.goldExit} (expected zero for fail_to_pass)`] : []),
+      "",
+      `Issue: ${details.issueCode ?? "unknown"}`,
+      `${details.issueMessage ?? previousError}`,
+      "",
+      ...(details.baseOutput ? [`Base output:\n${details.baseOutput}`] : []),
+      ...(details.goldOutput ? [`Gold output:\n${details.goldOutput}`] : []),
+      "",
+      "=== HOW TO FIX ===",
+      ...getFixSuggestions(details),
+      "",
+      "Please produce a corrected test that addresses ALL of the above issues.",
     );
   }
 
   return parts.join("\n");
 }
 
-function buildUserPrompt(contextPath: string): string {
-  return [
+/** Parse structured previousError string into fields. Format: "PILAB_FEEDBACK|issueCode|msg|baseExit|goldExit|baseOut|goldOut|testName|testKind|command" */
+function parsePreviousError(raw: string): {
+  issueCode: string;
+  issueMessage: string;
+  baseExit: number | undefined;
+  goldExit: number | undefined;
+  baseOutput: string | undefined;
+  goldOutput: string | undefined;
+  testName: string | undefined;
+  testKind: string | undefined;
+  command: string | undefined;
+} {
+  if (raw.startsWith("PILAB_FEEDBACK|")) {
+    const parts = raw.split("|");
+    return {
+      issueCode: parts[1] ?? "unknown",
+      issueMessage: parts[2] ?? raw,
+      baseExit: parts[3] ? Number(parts[3]) : undefined,
+      goldExit: parts[4] ? Number(parts[4]) : undefined,
+      baseOutput: parts[5] || undefined,
+      goldOutput: parts[6] || undefined,
+      testName: parts[7] || undefined,
+      testKind: parts[8] || undefined,
+      command: parts[9] || undefined,
+    };
+  }
+  // Fallback: unstructured text
+  return { issueCode: "unknown", issueMessage: raw, baseExit: undefined, goldExit: undefined, baseOutput: undefined, goldOutput: undefined, testName: undefined, testKind: undefined, command: undefined };
+}
+
+function getFixSuggestions(details: ReturnType<typeof parsePreviousError>): string[] {
+  const suggestions: string[] = [];
+  const code = details.issueCode || "";
+
+  if (code === "pass_fail_contract_not_met") {
+    if (details.baseExit === 0 && details.goldExit === 0) {
+      suggestions.push("- Both base AND gold passed. Your test doesn't catch the bug — it passes on the unfixed code too.");
+      suggestions.push("- Rethink: what exact behavior did the PR change? The test should FAIL on the OLD code.");
+      suggestions.push("- Check the PR diff to find a code path that was modified. Your test must trigger that path.");
+      suggestions.push("- Verify the test command matches the test file path and function name exactly.");
+    } else if (details.baseExit !== 0 && details.goldExit !== 0) {
+      suggestions.push("- Both base AND gold failed. The test itself has a bug (import error, syntax error, etc.).");
+      suggestions.push("- Check for missing imports. If you use pytest decorators, add 'import pytest' at the top.");
+      suggestions.push("- Make sure the test file path and function name match what the test command expects.");
+    }
+  }
+
+  if (code === "test_setup_failed") {
+    suggestions.push("- The test couldn't even run — there's a setup/import problem.");
+    suggestions.push("- Check ALL imports in the test code. Common issues:");
+    suggestions.push("  • 'import pytest' missing when using @pytest.mark.parametrize");
+    suggestions.push("  • 'import numpy as np' missing when using np.array()");
+    suggestions.push("  • 'from <package> import <module>' with wrong module path");
+  }
+
+  if (details.baseOutput?.includes("NameError") || details.goldOutput?.includes("NameError")) {
+    suggestions.push("- CRITICAL: The test file has a NameError — a name is used without being imported.");
+    suggestions.push("- Fix: add the missing import at the top of the test content field.");
+    suggestions.push("- Common: 'import pytest', 'import numpy as np', 'import pandas as pd'.");
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push("- Review the error output carefully and fix the root cause.");
+    suggestions.push("- Ensure all imports are present and the test file path is correct.");
+  }
+
+  suggestions.push("- Keep the test focused — test ONE specific behavior change from the PR.");
+  return suggestions;
+}
+
+function buildUserPrompt(contextPath: string, attempt: number): string {
+  const parts = [
     `I have written the issue, pull request, and repository metadata to ${contextPath}.`,
     "",
     "Your mission:",
     "1. READ the context file to understand the bug, fix, and changed files",
-    "2. SEARCH for existing tests in the changed files (especially any test files in the PR)",
-    "3. If test files were modified, READ them to understand the test strategy",
-    "4. SEARCH the codebase for related test files near the changed code",
-    "5. If suitable tests exist, analyze them. If not, create one.",
-    "6. Consider if this is a behavioral issue (UI, CLI, etc.) that needs a reproduction script",
-    "",
-    "Return ONLY the JSON object. No markdown. No explanations outside the JSON.",
+    ...(attempt > 1 ? [
+      "2. LOOK for the 'previousAttemptFeedback' field in the context file — it contains detailed feedback",
+      "   on why the previous test was rejected. Fix ALL issues mentioned there.",
+      "3. Then create the proposed tests as instructed above.",
+    ] : [
+      "2. Then create the proposed tests or behavioral reproduction as instructed above.",
+    ]),
   ].join("\n");
+  return parts;
 }
 
 async function cloneCommit(
@@ -416,7 +516,98 @@ function createCompactTestBuilderInput(input: TestBuilderInput) {
     previousAttemptLogs: input.previousAttemptLogs
       ? JSON.stringify(input.previousAttemptLogs).slice(0, 3_000)
       : null,
+    previousAttemptFeedback: input.previousAttemptLogs
+      ? formatPreviousAttemptFeedback(input.previousAttemptLogs)
+      : null,
   };
+}
+
+function formatPreviousAttemptFeedback(logs: unknown): string {
+  try {
+    const data = isRecord(logs) ? logs : {};
+    const tests = readArray(data, "tests");
+    if (tests.length === 0) return "No test results from previous attempt.";
+
+    const lines: string[] = ["=== PREVIOUS ATTEMPT FEEDBACK ==="];
+
+    for (const test of tests) {
+      if (!isRecord(test)) continue;
+      const name = test.name ?? "unknown";
+      const kind = test.kind ?? "unknown";
+      const status = test.status ?? "unknown";
+      const issues = readArray(test, "issues");
+
+      lines.push(`Test: ${name}`);
+      lines.push(`  Kind: ${kind} | Status: ${status}`);
+
+      const base = isRecord(test.base) ? test.base : null;
+      const gold = isRecord(test.gold) ? test.gold : null;
+
+      if (base) {
+        lines.push(`  Base exit code: ${base.exitCode ?? "N/A"}`);
+        const baseStderr = String(base.stderr ?? "").slice(0, 300);
+        if (baseStderr) lines.push(`  Base stderr: ${baseStderr}`);
+      }
+      if (gold) {
+        lines.push(`  Gold exit code: ${gold.exitCode ?? "N/A"}`);
+        const goldStderr = String(gold.stderr ?? "").slice(0, 300);
+        if (goldStderr) lines.push(`  Gold stderr: ${goldStderr}`);
+      }
+
+      for (const issue of issues) {
+        if (!isRecord(issue)) continue;
+        lines.push(`  Issue: [${issue.code}] ${String(issue.message ?? "").slice(0, 400)}`);
+      }
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  } catch {
+    return "Could not parse previous attempt feedback.";
+  }
+}
+
+/** Format previous validation logs into a PILAB_FEEDBACK structured string for the agent */
+function formatPreviousErrorForAgent(logs: unknown): string | null {
+  try {
+    const data = isRecord(logs) ? logs : {};
+    const tests = readArray(data, "tests");
+    if (tests.length === 0) return null;
+
+    const test = isRecord(tests[0]) ? tests[0] : null;
+    if (!test) return null;
+
+    const issues = readArray(test, "issues");
+    const issue = isRecord(issues[0]) ? issues[0] : null;
+    const issueCode = String(issue?.code ?? "unknown");
+    const issueMsg = String(issue?.message ?? "No details").slice(0, 500);
+
+    const base = isRecord(test.base) ? test.base : null;
+    const gold = isRecord(test.gold) ? test.gold : null;
+    const baseExit = base?.exitCode ?? "";
+    const goldExit = gold?.exitCode ?? "";
+    const baseOut = String(base?.stderr ?? base?.stdout ?? "").slice(0, 300);
+    const goldOut = String(gold?.stderr ?? gold?.stdout ?? "").slice(0, 300);
+    const testName = String(test.name ?? "");
+    const testKind = String(test.kind ?? "");
+    const command = String(test.testCommand ?? "").slice(0, 200);
+
+    // PILAB_FEEDBACK|code|message|baseExit|goldExit|baseOut|goldOut|testName|kind|command
+    return [
+      "PILAB_FEEDBACK",
+      issueCode,
+      issueMsg.replace(/\n/g, " | "),
+      baseExit,
+      goldExit,
+      baseOut.replace(/\n/g, " "),
+      goldOut.replace(/\n/g, " "),
+      testName,
+      testKind,
+      command,
+    ].join("|");
+  } catch {
+    return null;
+  }
 }
 
 function summarizeChangedFile(file: Record<string, unknown>) {

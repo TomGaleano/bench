@@ -478,6 +478,7 @@ function getStageLabel(stage: string | null): string {
     "docker-setup": "Setting up Docker evaluator",
     "validating-inputs": "Validating test inputs",
     "checking-repository-refs": "Cloning repository refs",
+    "setting-up-environment": "Setting up environment",
     "validating-test-patch": "Running PR test patch",
     "running-behavioral-reproduction": "Running behavioral reproduction",
     "validating-tests": "Running proposed tests",
@@ -496,7 +497,7 @@ function getStageLabel(stage: string | null): string {
 function getStagePhase(stage: string | null): "build" | "validate" | "done" | "unknown" {
   if (!stage) return "unknown";
   if (["loading-case-version", "validating-artifacts", "ready-for-test-builder"].includes(stage)) return "build";
-  if (["loading-validation-attempt", "docker-setup", "validating-inputs", "checking-repository-refs", "validating-test-patch", "running-behavioral-reproduction", "validating-tests", "running-grader", "persisting-results"].includes(stage)) return "validate";
+  if (["loading-validation-attempt", "docker-setup", "validating-inputs", "checking-repository-refs", "setting-up-environment", "validating-test-patch", "running-behavioral-reproduction", "validating-tests", "running-grader", "persisting-results"].includes(stage)) return "validate";
   if (["completed", "accepted", "rejected"].includes(stage)) return "done";
   if (stage === "failed" || stage === "error" || stage === "cancelled") return "done";
   return "unknown";
@@ -924,6 +925,13 @@ export default function NewCasePage() {
           </pre>
         </div>
       ) : null}
+
+      <div className="wz-info">
+        <strong>Limited runtime support.</strong> Validation currently only supports
+        Python projects with <code>pip</code> installable dependencies
+        (e.g. <code>requirements.txt</code>, <code>setup.py</code>, or <code>pyproject.toml</code>).
+        Node.js and other language support is coming soon.
+      </div>
 
       <div className="wz-carousel">
         {/* ─── Step 0: Source Issue + PR ─── */}

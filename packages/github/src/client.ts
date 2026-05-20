@@ -29,6 +29,57 @@ export class GitHubClientError extends Error {
   }
 }
 
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = 5;
+const BASE_DELAY_MS = 2_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wraps fetch with exponential backoff for rate limits (429) and server errors (5xx),
+ * plus network-level retries for transient failures.
+ */
+async function fetchWithRetry(
+  fetchImpl: typeof fetch,
+  url: URL,
+  requestInit: RequestInit,
+  attempt: number = 1,
+): Promise<Response> {
+  try {
+    const response = await fetchImpl(url, requestInit);
+
+    if (response.ok) return response;
+
+    if (!RETRYABLE_STATUSES.has(response.status) || attempt >= MAX_RETRIES) {
+      return response; // Let caller throw the error
+    }
+
+    // Calculate backoff: prefer Retry-After header, fall back to exponential + jitter
+    const retryAfter = response.headers.get("Retry-After");
+    const backoffMs = retryAfter
+      ? parseInt(retryAfter, 10) * 1000
+      : Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * 1000, 60_000);
+
+    console.warn(
+      `[github-client] rate-limited (${response.status}), retry ${attempt}/${MAX_RETRIES} after ${backoffMs}ms`
+    );
+    await delay(backoffMs);
+    return fetchWithRetry(fetchImpl, url, requestInit, attempt + 1);
+  } catch (error) {
+    // Network-level failure (DNS, timeout, connection refused, etc.)
+    if (attempt >= MAX_RETRIES) throw error;
+
+    const backoffMs = Math.min(BASE_DELAY_MS * Math.pow(2, attempt - 1) + Math.random() * 1000, 60_000);
+    console.warn(
+      `[github-client] network error (${error instanceof Error ? error.message : error}), retry ${attempt}/${MAX_RETRIES} after ${backoffMs}ms`
+    );
+    await delay(backoffMs);
+    return fetchWithRetry(fetchImpl, url, requestInit, attempt + 1);
+  }
+}
+
 export function createGitHubRequestHeaders(options: {
   token?: GitHubToken;
   userAgent?: string;
@@ -78,7 +129,7 @@ export function createGitHubClient(options: GitHubClientOptions = {}): GitHubCli
         requestInit.body = JSON.stringify(requestOptions.body);
       }
 
-      const response = await fetchImpl(url, requestInit);
+      const response = await fetchWithRetry(fetchImpl, url, requestInit);
 
       if (!response.ok) {
         throw new GitHubClientError(
@@ -120,7 +171,7 @@ export function createGitHubClient(options: GitHubClientOptions = {}): GitHubCli
         requestInit.body = JSON.stringify(requestOptions.body);
       }
 
-      const response = await fetchImpl(url, requestInit);
+      const response = await fetchWithRetry(fetchImpl, url, requestInit);
 
       if (!response.ok) {
         throw new GitHubClientError(

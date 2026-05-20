@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { setupEnvironment } from "./setup-environment.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -53,6 +54,7 @@ export type GitCommandExecutor = {
     commitSha: string;
     destinationPath: string;
     timeoutMs: number;
+    image?: string;
   }): Promise<CommandResult[]>;
   runShell(input: {
     command: string;
@@ -456,6 +458,7 @@ export function createValidationRunnerProcessor(input: {
           executor,
           commandTimeoutMs,
           repositoryReady: repository.ready,
+          updateProgress: (p) => job.updateProgress(createValidationRunnerProgress(p.stage, p.message)),
         });
       }
 
@@ -468,7 +471,6 @@ export function createValidationRunnerProcessor(input: {
 
       const hasValidationErrors =
         inputIssues.some((issue) => issue.severity === "error") ||
-        !repository.ready ||
         (testPatchResults?.issues.some((i) => i.severity === "error") ?? false) ||
         (behavioralResults?.issues.some((i) => i.severity === "error") ?? false);
 
@@ -947,6 +949,7 @@ async function checkRepositoryRefs(input: {
     };
   }
 
+  const image = selectImageForRepo(input.repoOwner, input.repoName);
   const tempRoot = await mkdtemp(path.join(tmpdir(), "pilab-validation-"));
   const basePath = path.join(tempRoot, "base");
   const goldPath = path.join(tempRoot, "gold");
@@ -957,12 +960,14 @@ async function checkRepositoryRefs(input: {
         commitSha: input.baseCommitSha,
         destinationPath: basePath,
         timeoutMs: input.timeoutMs,
+        image,
       }),
       input.executor.fetchCommit({
         repoUrl,
         commitSha: input.goldCommitSha,
         destinationPath: goldPath,
         timeoutMs: input.timeoutMs,
+        image,
       }),
     ]);
 
@@ -1394,6 +1399,7 @@ async function validateProposedTests(input: {
   executor: GitCommandExecutor;
   commandTimeoutMs: number;
   repositoryReady: boolean;
+  updateProgress?: (progress: { stage: string; message: string }) => Promise<void>;
 }): Promise<TestValidationResult[]> {
   const results: TestValidationResult[] = [];
 
@@ -1404,9 +1410,9 @@ async function validateProposedTests(input: {
 
     if (!input.repositoryReady) {
       staticIssues.push({
-        severity: "error",
+        severity: "warning",
         code: "repository_not_ready",
-        message: "Repository commits could not be fetched.",
+        message: "Repository commits could not be fetched — will retry clone during setup.",
       });
     }
 
@@ -1429,6 +1435,9 @@ async function validateProposedTests(input: {
   }
 
   // Clone once and install dependencies
+  if (input.updateProgress) {
+    await input.updateProgress({ stage: "setting-up-environment", message: "Setting up environment" });
+  }
   const cloned = await cloneAndSetupRepository({
     caseVersion: input.caseVersion,
     executor: input.executor,
@@ -1521,6 +1530,7 @@ async function cloneAndSetupRepository(input: {
   commandTimeoutMs: number;
 }): Promise<ClonedRepository> {
   const repoUrl = `https://github.com/${input.caseVersion.repoOwner}/${input.caseVersion.repoName}.git`;
+  const image = selectImageForRepo(input.caseVersion.repoOwner, input.caseVersion.repoName);
   const tempRoot = await mkdtemp(path.join(tmpdir(), "pilab-validation-"));
   const basePath = path.join(tempRoot, "base");
   const goldPath = path.join(tempRoot, "gold");
@@ -1547,12 +1557,14 @@ async function cloneAndSetupRepository(input: {
         commitSha: input.caseVersion.baseCommitSha,
         destinationPath: basePath,
         timeoutMs: input.commandTimeoutMs,
+        image,
       }),
       input.executor.fetchCommit({
         repoUrl,
         commitSha: goldCommitSha,
         destinationPath: goldPath,
         timeoutMs: input.commandTimeoutMs,
+        image,
       }),
     ]);
 
@@ -1581,20 +1593,27 @@ async function cloneAndSetupRepository(input: {
       return { basePath, goldPath, baseCommitSha: input.caseVersion.baseCommitSha, goldCommitSha, setupIssues: issues };
     }
 
-    // Install dependencies if a package manager is detected
-    const installResult = await installDependencies({
+    // Workaround for setuptools_scm: shallow clones break version detection.
+    // Write a fallback _version.py for packages that use setuptools_scm.
+    await Promise.all([
+      writeSetuptoolsScmFallback(input.executor, basePath),
+      writeSetuptoolsScmFallback(input.executor, goldPath),
+    ]);
+
+    // Install dependencies using LLM-driven setup agent
+    const setupResult = await setupEnvironment(
       basePath,
       goldPath,
-      executor: input.executor,
-      commandTimeoutMs: input.commandTimeoutMs,
-    });
+      input.executor,
+      input.commandTimeoutMs,
+    );
 
     return {
       basePath,
       goldPath,
       baseCommitSha: input.caseVersion.baseCommitSha,
       goldCommitSha,
-      setupIssues: installResult.issues,
+      setupIssues: setupResult.issues,
     };
   } catch (error) {
     return {
@@ -1609,182 +1628,6 @@ async function cloneAndSetupRepository(input: {
       }],
     };
   }
-}
-
-async function installDependencies(input: {
-  basePath: string;
-  goldPath: string;
-  executor: GitCommandExecutor;
-  commandTimeoutMs: number;
-}): Promise<{ issues: ValidationIssue[] }> {
-  const issues: ValidationIssue[] = [];
-
-  // Detect package manager from lock files in base (assume same in gold)
-  const packageManager = await detectPackageManager(input.basePath, input.executor);
-
-  if (!packageManager) {
-    // No lock file found — could be a simple project or unmanaged deps
-    return { issues };
-  }
-
-  const isWorkspace = await isMonorepoWorkspace(input.basePath, input.executor);
-  console.log(`[validation-runner] Workspace detected: ${isWorkspace} for ${input.basePath}`);
-
-  const [baseResult, goldResult] = await Promise.all([
-    installInWorkspace({
-      path: input.basePath,
-      executor: input.executor,
-      commandTimeoutMs: input.commandTimeoutMs,
-      packageManager,
-      isWorkspace,
-    }),
-    installInWorkspace({
-      path: input.goldPath,
-      executor: input.executor,
-      commandTimeoutMs: input.commandTimeoutMs,
-      packageManager,
-      isWorkspace,
-    }),
-  ]);
-
-  if (baseResult.exitCode !== 0) {
-    issues.push({
-      severity: "error",
-      code: "base_dependency_install_failed",
-      message: `Dependency install failed on base commit: ${baseResult.stderr.slice(0, 200)}`,
-    });
-  }
-
-  if (goldResult.exitCode !== 0) {
-    issues.push({
-      severity: "error",
-      code: "gold_dependency_install_failed",
-      message: `Dependency install failed on gold commit: ${goldResult.stderr.slice(0, 200)}`,
-    });
-  }
-
-  return { issues };
-}
-
-async function isMonorepoWorkspace(repoPath: string, executor: GitCommandExecutor): Promise<boolean> {
-  const { stat, readFile } = await import("node:fs/promises");
-
-  // Check for explicit workspace config files
-  if (await runtimeFileExists(executor, repoPath, "pnpm-workspace.yaml")) {
-    return true;
-  }
-
-  if (await runtimeFileExists(executor, repoPath, "pnpm-workspace.yml")) {
-    return true;
-  }
-
-  // Check package.json for workspaces field
-  try {
-    const pkgJsonPath = path.join(repoPath, "package.json");
-    if (!(await runtimeFileExists(executor, repoPath, "package.json"))) {
-      throw new Error("package.json not found");
-    }
-    const content = executor.readFile
-      ? await executor.readFile({ cwd: repoPath, filePath: "package.json" })
-      : await readFile(pkgJsonPath, "utf8");
-    const pkg = JSON.parse(content);
-    if (pkg.workspaces && (Array.isArray(pkg.workspaces) || typeof pkg.workspaces === "object")) {
-      return true;
-    }
-  } catch { /* continue */ }
-
-  // Check for lerna or nx
-  if (await runtimeFileExists(executor, repoPath, "lerna.json")) {
-    return true;
-  }
-
-  if (await runtimeFileExists(executor, repoPath, "nx.json")) {
-    return true;
-  }
-
-  return false;
-}
-
-async function installInWorkspace(input: {
-  path: string;
-  executor: GitCommandExecutor;
-  commandTimeoutMs: number;
-  packageManager: { name: string; installCommand: string };
-  isWorkspace: boolean;
-}): Promise<CommandResult> {
-  const installResult = await input.executor.runShell({
-    command: input.packageManager.installCommand,
-    cwd: input.path,
-    timeoutMs: input.commandTimeoutMs,
-  });
-
-  if (installResult.exitCode !== 0) {
-    return installResult;
-  }
-
-  // For workspaces, also build to compile workspace packages
-  if (input.isWorkspace) {
-    const buildCommand = input.packageManager.name === "pnpm"
-      ? "pnpm -r build"
-      : input.packageManager.name === "npm"
-        ? "npm run build --workspaces"
-        : input.packageManager.name === "yarn"
-          ? "yarn workspaces run build"
-          : null;
-
-    if (buildCommand) {
-      console.log(`[validation-runner] Running workspace build: ${buildCommand}`);
-      const buildResult = await input.executor.runShell({
-        command: buildCommand,
-        cwd: input.path,
-        timeoutMs: input.commandTimeoutMs,
-      });
-
-      // Build failure is a warning, not a blocker — some packages may not have build scripts
-      // but we still want to attempt tests
-      if (buildResult.exitCode !== 0) {
-        console.warn(`[validation-runner] Workspace build had issues (may be expected): ${buildResult.stderr.slice(0, 300)}`);
-      }
-    }
-  }
-
-  return installResult;
-}
-
-async function detectPackageManager(repoPath: string, executor: GitCommandExecutor): Promise<{ name: string; installCommand: string } | null> {
-  const { stat } = await import("node:fs/promises");
-
-  const checks = [
-    { file: "pnpm-lock.yaml", name: "pnpm", installCommand: "pnpm install" },
-    { file: "yarn.lock", name: "yarn", installCommand: "yarn install" },
-    { file: "package-lock.json", name: "npm", installCommand: "npm install" },
-    { file: "bun.lockb", name: "bun", installCommand: "bun install" },
-    { file: "Cargo.toml", name: "cargo", installCommand: "cargo fetch" },
-    { file: "go.mod", name: "go", installCommand: "go mod download" },
-    { file: "requirements.txt", name: "pip", installCommand: "pip install -r requirements.txt" },
-    { file: "setup.py", name: "pip", installCommand: "pip install -e ." },
-    { file: "pyproject.toml", name: "pip", installCommand: "pip install -e ." },
-    { file: "pom.xml", name: "maven", installCommand: "mvn dependency:resolve" },
-    { file: "build.gradle", name: "gradle", installCommand: "gradle dependencies" },
-    { file: "gradlew", name: "gradle", installCommand: "./gradlew dependencies" },
-  ];
-
-  for (const check of checks) {
-    try {
-      if (executor.fileExists) {
-        if (!(await executor.fileExists({ cwd: repoPath, filePath: check.file }))) {
-          continue;
-        }
-      } else {
-        await stat(path.join(repoPath, check.file));
-      }
-      return check;
-    } catch {
-      // file doesn't exist, try next
-    }
-  }
-
-  return null;
 }
 
 async function executeTestSpec(
@@ -1808,18 +1651,76 @@ async function executeTestSpec(
     materializeTestFile(input.executor, goldPath, test.filePath, test.content),
   ]);
 
-  const [baseResult, goldResult] = await Promise.all([
+  // For Python test commands, prepend PYTHONPATH=. so tests can import the local
+  // package even when pip install -e . failed (common for C-extension projects).
+  // SETUPTOOLS_SCM_PRETEND_VERSION prevents setuptools_scm from failing on shallow clones.
+  // Also rewrite "python -m pytest" to use the venv python so installed packages are found.
+  // Inject -W ignore to avoid warnings-as-errors conflicts with astropy's logger.
+  const pythonTestCommand = isPythonTestCommand(test.testCommand)
+    ? `SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 PYTHONPATH=. ${test.testCommand
+      .replace(/^python\s+-m\s+pytest\b/, ".venv/bin/python -m pytest")
+      .replace(/\bpytest\b/, "pytest -W ignore")}`
+    : test.testCommand;
+
+  let [baseResult, goldResult] = await Promise.all([
     input.executor.runShell({
-      command: test.testCommand,
+      command: pythonTestCommand,
       cwd: basePath,
       timeoutMs: input.commandTimeoutMs,
     }),
     input.executor.runShell({
-      command: test.testCommand,
+      command: pythonTestCommand,
       cwd: goldPath,
       timeoutMs: input.commandTimeoutMs,
     }),
   ]);
+
+  // If pytest is not on PATH, retry with the venv pytest
+  const pytestNotFound =
+    baseResult.stderr.includes("pytest: command not found") ||
+    goldResult.stderr.includes("pytest: command not found") ||
+    baseResult.stderr.includes("No module named pytest") ||
+    goldResult.stderr.includes("No module named pytest");
+  if (pytestNotFound && isPythonTestCommand(test.testCommand)) {
+    const fallbackCommand = test.testCommand
+      .replace(/^pytest\b/, ".venv/bin/pytest")
+      .replace(/^python\s+-m\s+pytest\b/, ".venv/bin/python -m pytest")
+      .replace(/\bpytest\b/, "pytest -W ignore");
+    const fallbackPythonCommand = isPythonTestCommand(fallbackCommand)
+      ? `SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 PYTHONPATH=. ${fallbackCommand}`
+      : fallbackCommand;
+    console.log(`[validation-runner] Retrying with venv pytest: ${fallbackPythonCommand}`);
+    [baseResult, goldResult] = await Promise.all([
+      input.executor.runShell({
+        command: fallbackPythonCommand,
+        cwd: basePath,
+        timeoutMs: input.commandTimeoutMs,
+      }),
+      input.executor.runShell({
+        command: fallbackPythonCommand,
+        cwd: goldPath,
+        timeoutMs: input.commandTimeoutMs,
+      }),
+    ]);
+  }
+
+  // Self-heal: if test failed with ModuleNotFoundError, install the missing dep and retry
+  if ((baseResult.exitCode !== 0 || goldResult.exitCode !== 0) && isPythonTestCommand(test.testCommand)) {
+    const missingModules = extractMissingModules(baseResult.stderr, goldResult.stderr);
+    if (missingModules.length > 0) {
+      console.log(`[validation-runner] Missing modules detected: ${missingModules.join(", ")}. Installing...`);
+      const pip = ".venv/bin/pip";
+      const installCmds = missingModules.map(m => `${pip} install ${m} 2>&1 || true`).join(" && ");
+      await input.executor.runShell({ command: installCmds, cwd: basePath, timeoutMs: 60_000 });
+      await input.executor.runShell({ command: installCmds, cwd: goldPath, timeoutMs: 60_000 });
+      // Retry test after installing missing deps
+      [baseResult, goldResult] = await Promise.all([
+        input.executor.runShell({ command: pythonTestCommand, cwd: basePath, timeoutMs: input.commandTimeoutMs }),
+        input.executor.runShell({ command: pythonTestCommand, cwd: goldPath, timeoutMs: input.commandTimeoutMs }),
+      ]);
+    }
+  }
+
   const basePassed = baseResult.exitCode === 0;
   const goldPassed = goldResult.exitCode === 0;
   const accepted = test.kind === "fail_to_pass"
@@ -1831,22 +1732,33 @@ async function executeTestSpec(
     const baseSetupError = detectSetupError(baseResult);
     const goldSetupError = detectSetupError(goldResult);
     if (baseSetupError || goldSetupError) {
+      const preview = (s: string, max: number) => s.length > max ? s.slice(0, max) + "..." : s;
       issues.push({
         severity: "error",
         code: "test_setup_failed",
         message: [
-          baseSetupError && `Base: ${baseSetupError}`,
-          goldSetupError && `Gold: ${goldSetupError}`,
-        ].filter(Boolean).join("; "),
+          baseSetupError && `Base commit: ${baseSetupError}`,
+          goldSetupError && `Gold commit: ${goldSetupError}`,
+          baseResult.stderr && `Base stderr (preview): ${preview(baseResult.stderr, 500)}`,
+          goldResult.stderr && `Gold stderr (preview): ${preview(goldResult.stderr, 500)}`,
+        ].filter(Boolean).join("\n"),
       });
     } else {
+      const preview = (s: string, max: number) => s.length > max ? s.slice(0, max) + "..." : s;
+      const baseOut = baseResult.stderr || baseResult.stdout;
+      const goldOut = goldResult.stderr || goldResult.stdout;
       issues.push({
         severity: "error",
         code: "pass_fail_contract_not_met",
-        message:
+        message: [
+          `Test '${test.name}' (kind: ${test.kind}) did not meet contract.`,
+          `Base exit: ${baseResult.exitCode} | Gold exit: ${goldResult.exitCode}`,
+          `Base output: ${preview(baseOut, 300)}`,
+          `Gold output: ${preview(goldOut, 300)}`,
           test.kind === "fail_to_pass"
-            ? "Expected base to fail and gold to pass."
-            : "Expected both base and gold to pass.",
+            ? "Expected base to FAIL and gold to PASS."
+            : "Expected both base AND gold to PASS.",
+        ].join("\n"),
       });
     }
   }
@@ -1888,31 +1800,68 @@ async function materializeTestFile(
   await writeFile(resolved, `${content}\n`, "utf8");
 }
 
+/** Extract Python package names from ModuleNotFoundError/ImportError messages */
+function extractMissingModules(stderrBase: string, stderrGold: string): string[] {
+  const both = `${stderrBase}\n${stderrGold}`;
+  const names = new Set<string>();
+  // Pattern: ModuleNotFoundError: No module named '<pkg>'
+  const re = /(?:ModuleNotFoundError|ImportError).*?No module named ['"]?([a-zA-Z_][a-zA-Z0-9_.]*)['"]?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(both)) !== null) {
+    const raw = m[1];
+    if (!raw) continue;
+    // Map dotted module paths to top-level package: e.g. sqlfluff.cli.commands → sqlfluff
+    const top = raw.split(".")[0];
+    if (top && top !== "pytest") names.add(top);
+  }
+  return [...names];
+}
+
 function detectSetupError(result: CommandResult): string | null {
   if (result.exitCode === 0) return null;
 
-  const combined = `${result.stdout}\n${result.stderr}`.toLowerCase();
+  const combined = `${result.stdout}\n${result.stderr}`;
+  const combinedLower = combined.toLowerCase();
 
-  // Module resolution errors
-  if (combined.includes("cannot find module") ||
-      combined.includes("failed to resolve") ||
-      combined.includes("module not found") ||
-      combined.includes("cannot resolve")) {
-    return "Module resolution failed - dependencies or workspace packages may not be properly installed";
+  // Python: NameError — usually means a missing import in the test file itself
+  if (combinedLower.includes("nameerror: name 'pytest' is not defined") ||
+      combinedLower.includes("nameerror: name 'np' is not defined") ||
+      combinedLower.includes("nameerror: name 'pd' is not defined")) {
+    return `Test file references undefined symbols — likely missing import statements. Error: ${result.stderr.split('\n')[0]}`;
+  }
+
+  // Python ModuleNotFoundError
+  if (combinedLower.includes("modulenotfounderror") || combinedLower.includes("importerror")) {
+    const lines = result.stderr.split('\n').filter(l => l.includes("ModuleNotFoundError") || l.includes("ImportError") || l.includes("No module named"));
+    return `Missing Python dependency — ${lines[0] || result.stderr.split('\n')[0]}`;
+  }
+
+  // Module resolution errors (Node)
+  if (combinedLower.includes("cannot find module") ||
+      combinedLower.includes("failed to resolve") ||
+      combinedLower.includes("module not found") ||
+      combinedLower.includes("cannot resolve")) {
+    return "Module resolution failed — dependencies or workspace packages may not be properly installed";
+  }
+
+  // pytest collection errors
+  if (result.exitCode === 2 || result.exitCode === 4) {
+    const errorLine = result.stderr.split('\n').slice(0, 5).join('\n');
+    return `Test collection failed (exit ${result.exitCode}) — ${errorLine}`;
   }
 
   // No tests found
-  if (combined.includes("no tests") || combined.includes("0 tests")) {
-    return "No tests executed - test file may not be discoverable";
+  if (combinedLower.includes("no tests") || combinedLower.includes("0 tests")) {
+    return "No tests executed — test file may not be discoverable";
   }
 
   // TypeScript compilation errors
-  if (combined.includes("typescript") && combined.includes("error")) {
+  if (combinedLower.includes("typescript") && combinedLower.includes("error")) {
     return "TypeScript compilation failed";
   }
 
   // Syntax errors
-  if (combined.includes("syntax error") || combined.includes("unexpected token")) {
+  if (combinedLower.includes("syntax error") || combinedLower.includes("unexpected token")) {
     return "Syntax error in test or source code";
   }
 
@@ -1944,6 +1893,7 @@ function createRuntimeGitCommandExecutor(runtime: RuntimeProvider): GitCommandEx
           repoUrl: input.repoUrl,
           commitSha: input.commitSha,
           timeoutMs: input.timeoutMs,
+          ...(input.image ? { image: input.image } : {}),
         });
         workspacesByPath.set(input.destinationPath, workspace);
         return [{ exitCode: 0, stdout: workspace.rootPath, stderr: "", timedOut: false }];
@@ -1976,8 +1926,10 @@ function createRuntimeGitCommandExecutor(runtime: RuntimeProvider): GitCommandEx
       return workspaceFor(input.cwd).readFile(input.filePath);
     },
     async fileExists(input) {
-      const result = await workspaceFor(input.cwd).run({
+      const workspace = workspaceFor(input.cwd);
+      const result = await workspace.run({
         command: `test -e ${shellQuote(input.filePath)}`,
+        cwd: workspace.rootPath,
         timeoutMs: 10_000,
       });
       return result.exitCode === 0;
@@ -2027,6 +1979,51 @@ async function runtimeFileExists(
     return true;
   } catch {
     return false;
+  }
+}
+
+async function writeSetuptoolsScmFallback(executor: GitCommandExecutor, cwd: string): Promise<void> {
+  try {
+    const pyprojectExists = await runtimeFileExists(executor, cwd, "pyproject.toml");
+    if (!pyprojectExists) return;
+
+    // Use runShell to read pyproject.toml to avoid potential readFile issues
+    const catResult = await executor.runShell({
+      command: "cat pyproject.toml",
+      cwd,
+      timeoutMs: 10_000,
+    });
+    if (catResult.exitCode !== 0) return;
+    if (!catResult.stdout.includes("setuptools_scm")) return;
+
+    // Find the top-level Python package directories by looking for __init__.py
+    const result = await executor.runShell({
+      command: "find . -maxdepth 2 -name '__init__.py' -not -path './.*' | head -20",
+      cwd,
+      timeoutMs: 10_000,
+    });
+    if (result.exitCode !== 0) return;
+
+    const packageDirs = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("./") && line.endsWith("/__init__.py"))
+      .map((line) => line.slice(2, -"/__init__.py".length))
+      .filter((name) => name && !name.includes("/"));
+
+    for (const pkg of packageDirs) {
+      const versionPath = `${pkg}/_version.py`;
+      const hasVersion = await runtimeFileExists(executor, cwd, versionPath);
+      if (!hasVersion) {
+        await executor.runShell({
+          command: `printf '%s\\n' 'version = "0.0.0"' > ${shellQuote(versionPath)}`,
+          cwd,
+          timeoutMs: 10_000,
+        });
+      }
+    }
+  } catch (error) {
+    console.warn(`[validation-runner] setuptools_scm fallback failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -2192,6 +2189,21 @@ async function markErrorIfPossible(input: {
   }
 }
 
+function selectImageForRepo(repoOwner: string, repoName: string, mergedAt?: string): string {
+  // Map Python release dates to decide base image.
+  // Python 3.9 = Oct 2020, 3.10 = Oct 2021, 3.11 = Oct 2022.
+  // For PRs merged before Oct 2022, prefer an older Python image.
+  if (mergedAt) {
+    const merged = new Date(mergedAt);
+    const py310Release = new Date("2021-10-04");
+    const py311Release = new Date("2022-10-24");
+    if (merged < py310Release) return "python:3.9-bullseye";
+    if (merged < py311Release) return "python:3.10-bullseye";
+  }
+  // Default: modern Python with full build toolchain
+  return "python:3.11-bookworm";
+}
+
 function isCommitSha(value: string): boolean {
   return /^[a-f0-9]{40}$/i.test(value);
 }
@@ -2214,6 +2226,11 @@ function isAllowedTestCommand(command: string): boolean {
     "gradle ",
     "./gradlew",
   ].some((prefix) => trimmed === prefix.trim() || trimmed.startsWith(prefix));
+}
+
+function isPythonTestCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return trimmed.startsWith("pytest") || trimmed.startsWith("python -m pytest");
 }
 
 function readOptionalString(value: unknown, key: string): string | undefined {
