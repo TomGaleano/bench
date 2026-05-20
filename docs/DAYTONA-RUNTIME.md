@@ -6,13 +6,15 @@ The worker process still hosts orchestration, database writes, artifact persiste
 
 ## Local OSS Deployment
 
-Follow Daytona OSS deployment docs:
+Start Daytona alongside Pi Lab infrastructure with a single command:
 
 ```bash
-git clone https://github.com/daytonaio/daytona
-cd daytona
-docker compose -f docker/docker-compose.yaml up -d
+docker compose -f infra/compose.yaml -f infra/compose.daytona.yaml up -d
 ```
+
+This reuses the existing Postgres, Redis, and MinIO from `infra/compose.yaml` and adds the Daytona API, runner, proxy, SSH gateway, Dex (OIDC), and an internal Docker registry.
+
+> **DNS requirement**: Add `127.0.0.1 proxy.localhost` to `/etc/hosts` for sandbox port proxying.
 
 Local defaults:
 
@@ -21,6 +23,18 @@ DAYTONA_API_URL=http://localhost:3000/api
 ```
 
 Daytona OSS binds its dashboard/API to host port `3000` by default. Pi Lab's web dev server uses port `3002` so Daytona can keep `3000` and the Pi Lab API can keep `3001`.
+
+### Manual deployment (alternative)
+
+Follow Daytona OSS deployment docs for running Daytona independently:
+
+```bash
+git clone https://github.com/daytonaio/daytona
+cd daytona
+docker compose -f docker/docker-compose.yaml up -d
+```
+
+### Getting an API key
 
 Create an API key with `write:sandboxes` and `delete:sandboxes` scopes and set:
 
