@@ -98,10 +98,14 @@ function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
         // E2B throws CommandExitError for non-zero exit codes — extract the actual result
         if (err && typeof err === "object" && "exitCode" in (err as Record<string, unknown>)) {
           const cmdErr = err as { exitCode: number; stdout: string; stderr: string; error?: string };
+          const errStdout = cmdErr.stdout ?? "";
+          const errStderr = cmdErr.stderr ?? "";
           return {
             exitCode: cmdErr.exitCode ?? 1,
-            stdout: cmdErr.stdout ?? "",
-            stderr: cmdErr.stderr ?? cmdErr.error ?? "",
+            stdout: errStdout,
+            // Stderr often carries only "exit status 1" from E2B — combine with stdout
+            // to capture pip build errors that get written to stdout.
+            stderr: errStderr || errStdout || cmdErr.error || "",
             timedOut: false,
           };
         }

@@ -80,12 +80,15 @@ async function analyzeAndInstall(
 
     for (const rawCmd of commands) {
       // Sanitize: strip sudo (sandbox runs as root), add pip retries for DNS flakiness
-      const cmd = rawCmd
+      let cmd = rawCmd
         .replace(/\bsudo\b/g, "")
-        .replace(/\bpip install\b/g, "pip install --retries 5 --timeout 30")
-        .replace(/\bpip3 install\b/g, "pip3 install --retries 5 --timeout 30")
         .replace(/\s+/g, " ")
         .trim();
+      // Add pip retries only if not already present (LLM may include them)
+      if (/pip install\b/.test(cmd) && !cmd.includes("--retries")) {
+        cmd = cmd.replace(/\bpip install\b/g, "pip install --retries 5 --timeout 30")
+                 .replace(/\bpip3 install\b/g, "pip3 install --retries 5 --timeout 30");
+      }
       console.log(`[setup-agent] running cmd: ${cmd.slice(0, 200)}`);
       const result = await executor.runShell({
         command: cmd,
@@ -117,8 +120,11 @@ async function analyzeAndInstall(
     }
 
     if (allOk) {
+      // Sanitize verify command: strip pkg_resources (often missing even with setuptools installed)
+      const safeVerify = installPlan.verifyCommand.replace(/import pkg_resources,\s*/g, "import ").replace(/import pkg_resources\b/g, "import sys");
+      console.log(`[setup-agent] verifying: ${safeVerify.slice(0, 150)}`);
       const verify = await executor.runShell({
-        command: installPlan.verifyCommand,
+        command: safeVerify,
         cwd,
         timeoutMs: 30_000,
       });
@@ -128,6 +134,12 @@ async function analyzeAndInstall(
     }
 
     if (attempt === 0 && installPlan.fallbackCommands) {
+      // Before asking the LLM for a diagnosis, try our known fixes first (faster, more reliable)
+      const knownIssue = await tryKnownFixes(executor, cwd, lastError, timeoutMs, installPlan);
+      if (knownIssue) {
+        console.log(`[setup-agent] known fix resolved the issue, skipping LLM diagnosis`);
+        return { success: true };
+      }
       const fix = await askAgentForDiagnosis(configFiles, installPlan.commands, lastError);
       installPlan.fallbackCommands = fix.commands;
       installPlan.verifyCommand = fix.verifyCommand;
@@ -137,6 +149,103 @@ async function analyzeAndInstall(
   }
 
   return { success: false, error: "Setup failed after retries" };
+}
+
+/**
+ * Try known fixes for common installation failures that the LLM may not resolve.
+ * Returns true if the fix was applied and the verify command passed.
+ */
+async function tryKnownFixes(
+  executor: Executor,
+  cwd: string,
+  lastError: string,
+  timeoutMs: number,
+  installPlan?: InstallPlan,
+): Promise<boolean> {
+  // lastError is truncated to 500 chars — the actual error (e.g. setuptools.dep_util)
+  // may be further in the output. Check if we have a setuptools version issue.
+  const combined = lastError.toLowerCase();
+  const versionCheck = await executor.runShell({
+    command: ".venv/bin/pip show setuptools 2>/dev/null | grep -i version || echo 'no setuptools'",
+    cwd,
+    timeoutMs: 15_000,
+  });
+  const setuptoolsVersion = versionCheck.stdout;
+  console.log(`[setup-agent] tryKnownFixes: entering with lastError=${lastError.slice(0, 80)} timeoutMs=${timeoutMs}`);
+  console.log(`[setup-agent] tryKnownFixes: setuptools=${setuptoolsVersion.trim().slice(0, 40)}`);
+
+  // Detect setuptools version mismatch: modern setuptools (>=60) removed setuptools.dep_util
+  // which old projects (astropy, etc.) still need.
+  const needsOldSetuptools = combined.includes("setuptools.dep_util") ||
+    combined.includes("invalid command 'bdist_wheel'") ||
+    combined.includes("extension_helpers") ||
+    (setuptoolsVersion.includes("Version:") && combined.includes("metadata"));
+
+  // Fix 1: pkg_resources not available (missing setuptools in venv)
+  if (combined.includes("pkg_resources") || combined.includes("no module named 'pkg_resources'")) {
+    console.log(`[setup-agent] detected missing pkg_resources, installing setuptools...`);
+    const install = await executor.runShell({
+      command: ".venv/bin/pip install setuptools wheel --retries 5 --timeout 30",
+      cwd,
+      timeoutMs: Math.min(timeoutMs, 60_000),
+    });
+    if (install.exitCode !== 0) return false;
+    const verifyCmd = installPlan?.verifyCommand ?? ".venv/bin/python -c 'import sys; print(sys.version)'";
+    const verify = await executor.runShell({
+      command: verifyCmd.replace(/import pkg_resources,\s*/g, "import ").replace(/import pkg_resources\b/g, "import sys"),
+      cwd,
+      timeoutMs: 30_000,
+    });
+    return verify.exitCode === 0;
+  }
+
+  // Fix 2: setuptools.dep_util missing — astropy and other old C-extension projects
+  // need setuptools < 60 and setuptools_scm < 7 to avoid the removed dep_util module.
+  // Also covers "invalid command 'bdist_wheel'", "extension_helpers" errors, and any
+  // pip install metadata/build failure that isn't resolved by the LLM.
+  if (needsOldSetuptools || combined.includes("editable metadata") || combined.includes("getting requirements to build")) {
+    console.log(`[setup-agent] detected setuptools compatibility issue, installing pinned build deps...`);
+    console.log(`[setup-agent] installing pinned build deps...`);
+    const install = await executor.runShell({
+      command: ".venv/bin/pip install 'setuptools<60' 'setuptools_scm<7' wheel cython 'numpy<2' extension-helpers pyerfa --retries 5 --timeout 30",
+      cwd,
+      timeoutMs: Math.min(timeoutMs, 120_000),
+    });
+    console.log(`[setup-agent] pinned deps install: exit=${install.exitCode} ${install.stderr.slice(0, 100)}`);
+    if (install.exitCode !== 0) return false;
+
+    console.log(`[setup-agent] retrying editable install with --no-build-isolation...`);
+    const retryInstall = await executor.runShell({
+      command: ".venv/bin/pip install -e . --no-build-isolation --retries 5 --timeout 30",
+      cwd,
+      timeoutMs,
+    });
+    console.log(`[setup-agent] editable install: exit=${retryInstall.exitCode} ${retryInstall.stderr.slice(0, 200)}`);
+    if (retryInstall.exitCode !== 0) return false;
+
+    console.log(`[setup-agent] verifying astropy import...`);
+    const verify = await executor.runShell({
+      command: ".venv/bin/python -c 'import astropy; print(astropy.__version__)' 2>/dev/null || .venv/bin/python -c 'import sys; print(sys.version)'",
+      cwd,
+      timeoutMs: 30_000,
+    });
+    console.log(`[setup-agent] verify: exit=${verify.exitCode} out=${verify.stdout.trim().slice(0, 50)}`);
+    return verify.exitCode === 0;
+  }
+
+  // Fix 2: general pip fallback when the LLM couldn't fix it — try installing
+  // the package with --no-build-isolation after ensuring basic build tools
+  if (combined.includes("pip install -e .") || combined.includes("editable") ||
+      combined.includes("metadata") || combined.includes("build")) {
+    const install = await executor.runShell({
+      command: ".venv/bin/pip install build wheel setuptools --retries 5 --timeout 30 2>&1; .venv/bin/pip install -e . --no-build-isolation --retries 5 --timeout 30",
+      cwd,
+      timeoutMs,
+    });
+    return install.exitCode === 0;
+  }
+
+  return false;
 }
 
 async function readProjectConfigs(
@@ -298,8 +407,10 @@ async function callLLM(prompt: string): Promise<string> {
 
       if (!response.ok) {
         const body = await response.text();
+        const keyPreview = apiKey.slice(0, 12) + "...";
+        console.warn(`[setup-agent] LLM call attempt ${attempt} failed: ${response.status} body=${body.slice(0, 200)} key=${keyPreview}`);
         if (attempt < 3 && (response.status === 401 || response.status === 429 || response.status >= 500)) {
-          console.warn(`[setup-agent] LLM call attempt ${attempt} failed (${response.status}), retrying...`);
+          console.warn(`[setup-agent] retrying (${attempt}/3)...`);
           await delay(2_000 * attempt);
           continue;
         }
