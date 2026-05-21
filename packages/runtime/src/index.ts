@@ -167,42 +167,79 @@ function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
     id,
     rootPath,
     async run(commandInput) {
-      const { exitCode, stdout, stderr, error } = await sandbox.commands.run(commandInput.command, {
-        cwd: commandInput.cwd ?? rootPath,
-        ...(commandInput.env ? { envs: commandInput.env } : {}),
-        timeoutMs: commandInput.timeoutMs,
-      });
-      return {
-        exitCode: exitCode ?? (error ? 1 : 0),
-        stdout: stdout ?? "",
-        stderr: stderr ?? error ?? "",
-        timedOut: false,
-      };
+      try {
+        const result = await sandbox.commands.run(commandInput.command, {
+          cwd: commandInput.cwd ?? rootPath,
+          ...(commandInput.env ? { envs: commandInput.env } : {}),
+          timeoutMs: commandInput.timeoutMs,
+        });
+        return {
+          exitCode: result.exitCode ?? 0,
+          stdout: result.stdout ?? "",
+          stderr: result.stderr ?? "",
+          timedOut: false,
+        };
+      } catch (err) {
+        // E2B throws CommandExitError for non-zero exit codes — extract the actual result
+        if (err && typeof err === "object" && "exitCode" in (err as Record<string, unknown>)) {
+          const cmdErr = err as { exitCode: number; stdout: string; stderr: string; error?: string };
+          return {
+            exitCode: cmdErr.exitCode ?? 1,
+            stdout: cmdErr.stdout ?? "",
+            stderr: cmdErr.stderr ?? cmdErr.error ?? "",
+            timedOut: false,
+          };
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: msg,
+          timedOut: msg.includes("timeout") || msg.includes("timed out"),
+        };
+      }
     },
     async runStreaming(commandInput) {
       let fullStdout = "";
       let fullStderr = "";
 
-      const { exitCode, stdout, stderr, error } = await sandbox.commands.run(commandInput.command, {
-        cwd: commandInput.cwd ?? rootPath,
-        ...(commandInput.env ? { envs: commandInput.env } : {}),
-        timeoutMs: commandInput.timeoutMs,
-        onStdout(chunk: string) {
-          fullStdout += chunk;
-          commandInput.onStdout?.(chunk);
-        },
-        onStderr(chunk: string) {
-          fullStderr += chunk;
-          commandInput.onStderr?.(chunk);
-        },
-      });
-
-      return {
-        exitCode: exitCode ?? (error ? 1 : 0),
-        stdout: fullStdout || stdout || "",
-        stderr: fullStderr || stderr || error || "",
-        timedOut: false,
-      };
+      try {
+        const result = await sandbox.commands.run(commandInput.command, {
+          cwd: commandInput.cwd ?? rootPath,
+          ...(commandInput.env ? { envs: commandInput.env } : {}),
+          timeoutMs: commandInput.timeoutMs,
+          onStdout(chunk: string) {
+            fullStdout += chunk;
+            commandInput.onStdout?.(chunk);
+          },
+          onStderr(chunk: string) {
+            fullStderr += chunk;
+            commandInput.onStderr?.(chunk);
+          },
+        });
+        return {
+          exitCode: result.exitCode ?? 0,
+          stdout: fullStdout || result.stdout || "",
+          stderr: fullStderr || result.stderr || "",
+          timedOut: false,
+        };
+      } catch (err) {
+        if (err && typeof err === "object" && "exitCode" in (err as Record<string, unknown>)) {
+          const cmdErr = err as { exitCode: number; stdout: string; stderr: string };
+          return {
+            exitCode: cmdErr.exitCode ?? 1,
+            stdout: fullStdout || cmdErr.stdout || "",
+            stderr: fullStderr || cmdErr.stderr || "",
+            timedOut: false,
+          };
+        }
+        return {
+          exitCode: 1,
+          stdout: fullStdout,
+          stderr: fullStderr || (err instanceof Error ? err.message : String(err)),
+          timedOut: false,
+        };
+      }
     },
     async writeFile(fileInput) {
       await sandbox.files.write(fileInput.path, fileInput.content);
