@@ -214,14 +214,24 @@ async function tryKnownFixes(
     console.log(`[setup-agent] pinned deps install: exit=${install.exitCode} ${install.stderr.slice(0, 100)}`);
     if (install.exitCode !== 0) return false;
 
-    console.log(`[setup-agent] retrying editable install with --no-build-isolation...`);
+    console.log(`[setup-agent] retrying install with setup.py develop (old setuptools doesn't support pip install -e)...`);
     const retryInstall = await executor.runShell({
-      command: ".venv/bin/pip install -e . --no-build-isolation --retries 5 --timeout 30",
+      // Old setuptools (<60) doesn't support PEP 660 build_editable hook, so use setup.py develop
+      command: ".venv/bin/python setup.py develop 2>&1",
       cwd,
       timeoutMs,
     });
-    console.log(`[setup-agent] editable install: exit=${retryInstall.exitCode} ${retryInstall.stderr.slice(0, 200)}`);
-    if (retryInstall.exitCode !== 0) return false;
+    console.log(`[setup-agent] setup.py develop: exit=${retryInstall.exitCode} ${retryInstall.stderr.slice(0, 200)}`);
+    // If setup.py develop also fails, try building extensions in-place
+    if (retryInstall.exitCode !== 0) {
+      const buildResult = await executor.runShell({
+        command: ".venv/bin/python setup.py build_ext --inplace 2>&1",
+        cwd,
+        timeoutMs,
+      });
+      console.log(`[setup-agent] build_ext --inplace: exit=${buildResult.exitCode}`);
+      if (buildResult.exitCode !== 0) return false;
+    }
 
     console.log(`[setup-agent] verifying astropy import...`);
     const verify = await executor.runShell({
@@ -230,7 +240,15 @@ async function tryKnownFixes(
       timeoutMs: 30_000,
     });
     console.log(`[setup-agent] verify: exit=${verify.exitCode} out=${verify.stdout.trim().slice(0, 50)}`);
-    return verify.exitCode === 0;
+    if (verify.exitCode !== 0) return false;
+
+    // Ensure pytest is available (post-install step was skipped because the LLM's commands failed)
+    await executor.runShell({
+      command: ".venv/bin/pip install pytest 2>/dev/null || true",
+      cwd,
+      timeoutMs: 60_000,
+    });
+    return true;
   }
 
   // Fix 2: general pip fallback when the LLM couldn't fix it — try installing
