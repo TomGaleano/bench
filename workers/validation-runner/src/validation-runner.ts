@@ -216,9 +216,10 @@ export function createDrizzleValidationRunnerStore(
       await db
         .update(caseVersions)
         .set({
-          status: input.status === "rejected" || input.status === "error"
-            ? "rejected"
-            : "candidate",
+          // Don't set "rejected" here — handleValidationCompletion decides the
+          // final status once all retry attempts are exhausted. Keep "validating"
+          // so the UI doesn't prematurely show rejection while retries are pending.
+          status: input.status === "accepted" ? "candidate" : "validating",
           validationLogArtifactId: input.validationLogArtifactId,
           validationRunnerVersion: input.runnerVersion,
           metadata: {
@@ -1654,12 +1655,14 @@ async function executeTestSpec(
   // For Python test commands, prepend PYTHONPATH=. so tests can import the local
   // package even when pip install -e . failed (common for C-extension projects).
   // SETUPTOOLS_SCM_PRETEND_VERSION prevents setuptools_scm from failing on shallow clones.
-  // Also rewrite "python -m pytest" to use the venv python so installed packages are found.
+  // Rewrite "pytest" / "python -m pytest" to use the venv path directly — the venv
+  // bin directory is not on the system PATH in E2B sandboxes.
   // Inject -W ignore to avoid warnings-as-errors conflicts with astropy's logger.
   const pythonTestCommand = isPythonTestCommand(test.testCommand)
     ? `SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 PYTHONPATH=. ${test.testCommand
-      .replace(/^python\s+-m\s+pytest\b/, ".venv/bin/python -m pytest")
-      .replace(/\bpytest\b/, "pytest -W ignore")}`
+      .replace(/^pytest\b/, ".venv/bin/pytest -W ignore")
+      .replace(/^python\s+-m\s+pytest\b/, ".venv/bin/python -m pytest -W ignore")
+      .replace(/\bpytest\b/, ".venv/bin/pytest -W ignore")}`
     : test.testCommand;
 
   let [baseResult, goldResult] = await Promise.all([
@@ -1680,7 +1683,9 @@ async function executeTestSpec(
     baseResult.stderr.includes("pytest: command not found") ||
     goldResult.stderr.includes("pytest: command not found") ||
     baseResult.stderr.includes("No module named pytest") ||
-    goldResult.stderr.includes("No module named pytest");
+    goldResult.stderr.includes("No module named pytest") ||
+    baseResult.exitCode === 127 ||
+    goldResult.exitCode === 127;
   if (pytestNotFound && isPythonTestCommand(test.testCommand)) {
     const fallbackCommand = test.testCommand
       .replace(/^pytest\b/, ".venv/bin/pytest")
