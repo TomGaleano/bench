@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type {
@@ -33,13 +33,15 @@ type ToolGroupItem = {
 };
 type StatusItem = { kind: "status"; key: string; status: string };
 type ErrorItem = { kind: "error"; key: string; message: string };
+type UserItem = { kind: "user"; key: string; text: string };
 
 type TranscriptItem =
   | TextItem
   | ToolItem
   | ToolGroupItem
   | StatusItem
-  | ErrorItem;
+  | ErrorItem
+  | UserItem;
 
 type AgentPanelProps = {
   agentRun: PlaygroundAgentRunResponse;
@@ -47,6 +49,8 @@ type AgentPanelProps = {
   index: number;
   showPreview?: boolean;
   onStop?: () => void;
+  onSendFollowUp?: (text: string) => Promise<void>;
+  sandboxReleased?: boolean;
   compact?: boolean;
 };
 
@@ -56,6 +60,8 @@ export function AgentPanel({
   index,
   showPreview = false,
   onStop,
+  onSendFollowUp,
+  sandboxReleased = false,
   compact = false,
 }: AgentPanelProps) {
   const transcript = useMemo(() => groupTranscript(buildTranscript(events)), [events]);
@@ -145,6 +151,92 @@ export function AgentPanel({
           })
         )}
       </div>
+
+      {onSendFollowUp && (
+        <FollowUpInput
+          agentRunId={agentRun.id}
+          status={agentRun.status}
+          sandboxReleased={sandboxReleased}
+          onSend={onSendFollowUp}
+        />
+      )}
+    </div>
+  );
+}
+
+function FollowUpInput({
+  agentRunId,
+  status,
+  sandboxReleased,
+  onSend,
+}: {
+  agentRunId: string;
+  status: string;
+  sandboxReleased: boolean;
+  onSend: (text: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const firstTurnInFlight = status === "queued" || status === "preparing";
+  const followUpInFlight = status === "running";
+  const disabled = sandboxReleased || firstTurnInFlight || followUpInFlight;
+  const placeholder = sandboxReleased
+    ? "Sandbox released — start a new playground to continue"
+    : firstTurnInFlight
+      ? "Agent is starting up…"
+      : followUpInFlight
+        ? "Agent is replying…"
+        : "Follow up — Enter to send, Shift+Enter for newline";
+
+  async function submit() {
+    const text = draft.trim();
+    if (!text || disabled) return;
+    setSending(true);
+    setError(null);
+    try {
+      await onSend(text);
+      setDraft("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(
+        message === "sandbox_released"
+          ? "Sandbox was released — your follow-up can't be delivered."
+          : message,
+      );
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="pg-followup" data-agent={agentRunId}>
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value.slice(0, 4000))}
+        placeholder={placeholder}
+        disabled={disabled || sending}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+        rows={1}
+      />
+      <div className="pg-followup-actions">
+        <span className="pg-followup-counter">{draft.length} / 4000</span>
+        <button
+          type="button"
+          className="btn2 primary sm"
+          disabled={disabled || sending || draft.trim().length === 0}
+          onClick={() => void submit()}
+        >
+          {sending ? "Sending…" : "Send"}
+        </button>
+      </div>
+      {error && <div className="pg-followup-err">{error}</div>}
     </div>
   );
 }
@@ -292,6 +384,20 @@ function renderItem(item: TranscriptItem, withCursor: boolean) {
       </div>
     );
   }
+  if (item.kind === "user") {
+    return (
+      <div key={item.key} className="pg-tx-user">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+          }}
+        >
+          {item.text}
+        </ReactMarkdown>
+      </div>
+    );
+  }
   return (
     <div key={item.key} className="pg-tx-err">
       {item.message}
@@ -349,6 +455,7 @@ function copyTranscript(items: TranscriptItem[]) {
           .join("\n");
       if (item.kind === "status") return `· ${item.status}`;
       if (item.kind === "error") return `[error] ${item.message}`;
+      if (item.kind === "user") return `> ${item.text}`;
       return "";
     })
     .filter(Boolean)
@@ -479,6 +586,21 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
         key: `url-${ev.id}`,
         status: `app at ${String(payload.url ?? "")}`,
       });
+      continue;
+    }
+
+    if (ev.kind === "user_follow_up") {
+      flushText();
+      items.push({
+        kind: "user",
+        key: `user-${ev.id}`,
+        text: String(payload.text ?? ""),
+      });
+      continue;
+    }
+
+    // turn_complete is observed by the worker but doesn't render in the UI.
+    if (ev.kind === "turn_complete") {
       continue;
     }
   }

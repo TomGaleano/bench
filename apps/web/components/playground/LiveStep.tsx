@@ -20,6 +20,8 @@ type LiveStepProps = {
   allFailed: boolean;
   onContinue: () => void;
   onStopAgent?: (agentRunId: string) => void;
+  onSendFollowUp?: (agentRunId: string, text: string) => Promise<void>;
+  sandboxReleased?: boolean;
 };
 
 export function LiveStep({
@@ -30,6 +32,8 @@ export function LiveStep({
   allFailed,
   onContinue,
   onStopAgent,
+  onSendFollowUp,
+  sandboxReleased = false,
 }: LiveStepProps) {
   const [mode, setMode] = useState<LiveLayoutMode>("grid");
   const [focusedAgentId, setFocusedAgentId] = useState<string | null>(null);
@@ -99,7 +103,9 @@ export function LiveStep({
             events={events.filter((e) => e.agentRunId === focusedRun.id)}
             index={session.agentRuns.findIndex((r) => r.id === focusedRun.id)}
             showPreview={Boolean(focusedRun.appUrl)}
+            sandboxReleased={sandboxReleased}
             {...(onStopAgent ? { onStop: () => onStopAgent(focusedRun.id) } : {})}
+            {...(onSendFollowUp ? { onSendFollowUp: (text: string) => onSendFollowUp(focusedRun.id, text) } : {})}
           />
           <div className="pg-focused-strip">
             <div
@@ -136,7 +142,9 @@ export function LiveStep({
               agentRun={run}
               events={events.filter((e) => e.agentRunId === run.id)}
               index={idx}
+              sandboxReleased={sandboxReleased}
               {...(onStopAgent ? { onStop: () => onStopAgent(run.id) } : {})}
+              {...(onSendFollowUp ? { onSendFollowUp: (text: string) => onSendFollowUp(run.id, text) } : {})}
             />
           ))}
         </div>

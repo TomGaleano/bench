@@ -38,6 +38,8 @@ export const playgroundEventKind = pgEnum("playground_event_kind", [
   "port_open",
   "url_resolved",
   "error",
+  "user_follow_up",
+  "turn_complete",
 ]);
 
 export const playgroundSessions = pgTable("playground_sessions", {

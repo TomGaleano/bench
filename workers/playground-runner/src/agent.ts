@@ -1,4 +1,15 @@
-import { createBenchmarkRuntime, runSandboxPiAgent, type RuntimeProvider, type RuntimeWorkspace } from "@pilab/runtime";
+import { createBenchmarkRuntime, runSandboxPiAgent, shellQuote, type RuntimeProvider, type RuntimeWorkspace } from "@pilab/runtime";
+
+export type AgentInbox = {
+  appendFollowUp(text: string): Promise<void>;
+  sendDone(): Promise<void>;
+};
+
+type AgentHandle = {
+  result: AgentRunResult;
+  inbox: AgentInbox;
+  scriptDone: Promise<void>;
+};
 
 const SETUP_PYTHON_SCRIPT = `
 set -euo pipefail
@@ -46,7 +57,9 @@ type AppendEventBody = {
     | "tool_call_finished"
     | "port_open"
     | "url_resolved"
-    | "error";
+    | "error"
+    | "user_follow_up"
+    | "turn_complete";
   payload?: Record<string, unknown>;
 };
 
@@ -136,6 +149,9 @@ export async function runPlaygroundSession(input: {
   waitForRelease(sessionId: string, timeoutMs: number): Promise<void>;
   /** Hook for the worker to register a per-agent AbortController so cancel-run signals can hit it. */
   registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
+  /** Hook for the worker to register a follow-up inbox per agent. The worker
+   *  invokes `appendFollowUp` when a user sends a new turn over Redis. */
+  registerFollowUpInbox?: (agentRunId: string, inbox: AgentInbox) => () => void;
   tools?: string[];
   seedPromptText?: string;
   sandboxImage?: string;
@@ -151,6 +167,7 @@ export async function runPlaygroundSession(input: {
     signal,
     waitForRelease,
     registerAgentSignal,
+    registerFollowUpInbox,
     tools,
     seedPromptText,
     sandboxImage,
@@ -247,8 +264,11 @@ export async function runPlaygroundSession(input: {
       }
     }
 
-    // Run all agents in parallel.
-    const results = await Promise.all(
+    // Kick off every agent in parallel. Each returns a handle: { result, inbox,
+    // scriptDone }. We wait for the first turn (`result`) before holding for
+    // review; the underlying script stays alive in the sandbox so the worker
+    // can pipe follow-up turns into the agent's inbox file.
+    const handles = await Promise.all(
       worktreePlans.map((plan) =>
         runPlaygroundAgent({
           apiBaseUrl,
@@ -269,21 +289,50 @@ export async function runPlaygroundSession(input: {
           tools: allowedTools,
           hasSeed: Boolean(seedPromptText && seedPromptText.trim().length > 0),
           ...(registerAgentSignal ? { registerAgentSignal } : {}),
-        }).catch((err): AgentRunResult => ({
-          agentRunId: plan.spec.agentRunId,
-          status: "failed",
-          appUrl: null,
-          output: "",
-          errorMessage: err instanceof Error ? err.message : String(err),
+        }).catch((err): AgentHandle => ({
+          result: {
+            agentRunId: plan.spec.agentRunId,
+            status: "failed",
+            appUrl: null,
+            output: "",
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+          inbox: { appendFollowUp: async () => undefined, sendDone: async () => undefined },
+          scriptDone: Promise.resolve(),
         })),
       ),
     );
 
-    // Keep the sandbox alive so the human can poke around the agents' apps via the
-    // resolved URLs. Either the frontend signals release (button / score submit) or
-    // we time out after maxReviewSeconds.
-    console.log(`[playground-runner] session ${sessionId.slice(0, 8)} agents finished — holding sandbox for review (max ${maxReviewSeconds}s)`);
+    const results = handles.map((h) => h.result);
+
+    // Register each agent's inbox with the worker so external follow-up
+    // pub/sub events can flow into it.
+    const unregisterInboxes: Array<() => void> = [];
+    if (registerFollowUpInbox) {
+      for (let i = 0; i < worktreePlans.length; i++) {
+        const plan = worktreePlans[i]!;
+        const handle = handles[i]!;
+        unregisterInboxes.push(registerFollowUpInbox(plan.spec.agentRunId, handle.inbox));
+      }
+    }
+
+    // Keep the sandbox alive so the human can poke around the agents' apps and
+    // send follow-up turns. Either the frontend signals release (button /
+    // score submit) or we time out after maxReviewSeconds.
+    console.log(`[playground-runner] session ${sessionId.slice(0, 8)} first turns finished — holding sandbox for review (max ${maxReviewSeconds}s)`);
     await waitForRelease(sessionId, maxReviewSeconds * 1000);
+
+    // Tell every script to exit cleanly, then wait for them (with a short
+    // timeout so a misbehaving script can't block the sandbox tear-down).
+    for (const handle of handles) {
+      await handle.inbox.sendDone().catch(() => undefined);
+    }
+    await Promise.race([
+      Promise.allSettled(handles.map((h) => h.scriptDone)),
+      new Promise<void>((resolve) => setTimeout(resolve, 30_000)),
+    ]);
+
+    for (const unreg of unregisterInboxes) unreg();
 
     return { sandboxId, agentResults: results };
   } finally {
@@ -315,7 +364,7 @@ async function runPlaygroundAgent(input: {
   tools: string[];
   hasSeed: boolean;
   registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
-}): Promise<AgentRunResult> {
+}): Promise<AgentHandle> {
   const {
     apiBaseUrl, sessionId, sandbox, prompt,
     spec, index, totalAgents, peers,
@@ -328,6 +377,7 @@ async function runPlaygroundAgent(input: {
   let seq = 1;
   const nextSeq = () => ++seq;
   const textChunks: string[] = [];
+  const followUpInboxPath = `${worktreePath}/.pilab-followups.jsonl`;
 
   // Local AbortController chained off the session signal so cancel-run can target one agent.
   const localController = new AbortController();
@@ -338,6 +388,70 @@ async function runPlaygroundAgent(input: {
   const event = async (kind: AppendEventBody["kind"], payload: Record<string, unknown>) => {
     await postEvent(ctx, { kind, payload }, nextSeq());
   };
+
+  // Inbox file lives next to the worktree. The runtime pre-creates it.
+  // appendFollowUp writes a JSONL line; sendDone writes the {done:true} sentinel.
+  const inbox: AgentInbox = {
+    async appendFollowUp(text: string) {
+      const line = JSON.stringify({ text });
+      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
+      await sandbox.run({
+        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
+        timeoutMs: 5_000,
+      });
+    },
+    async sendDone() {
+      const line = JSON.stringify({ done: true });
+      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
+      await sandbox.run({
+        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
+        timeoutMs: 5_000,
+      });
+    },
+  };
+
+  let firstTurnResolve!: (value: AgentRunResult) => void;
+  let firstTurnReject!: (err: Error) => void;
+  const firstTurnPromise = new Promise<AgentRunResult>((resolve, reject) => {
+    firstTurnResolve = resolve;
+    firstTurnReject = reject;
+  });
+  let firstTurnDone = false;
+  let turnInFlight: Promise<void> = Promise.resolve();
+
+  // Handler called whenever the script emits a `pilab_turn_complete` event.
+  // Re-polls for a listening port + snapshots the worktree, posts a run update.
+  async function handleTurnComplete(turn: number) {
+    try {
+      const resolvedUrl = await pollForListeningPort(sandbox, assignedPort, appUrl);
+      if (resolvedUrl) {
+        await event("port_open", { port: assignedPort });
+        await event("url_resolved", { url: resolvedUrl });
+      }
+      const stats = await snapshotWorktreeStats(sandbox, worktreePath);
+      await event("turn_complete", { turn });
+      const output = textChunks.join("");
+      await postRunUpdate(ctx, {
+        status: "succeeded",
+        output,
+        ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
+        ...(stats.fileCount != null ? { fileCount: stats.fileCount } : {}),
+        ...(stats.loc != null ? { loc: stats.loc } : {}),
+        finishedAt: new Date().toISOString(),
+      });
+      if (!firstTurnDone) {
+        firstTurnDone = true;
+        firstTurnResolve({
+          agentRunId: spec.agentRunId,
+          status: "succeeded",
+          appUrl: resolvedUrl,
+          output,
+        });
+      }
+    } catch (err) {
+      console.error(`[playground-runner] handleTurnComplete error for ${spec.agentRunId.slice(0, 8)}:`, err);
+    }
+  }
 
   try {
     await event("status", {
@@ -361,12 +475,12 @@ async function runPlaygroundAgent(input: {
       hasSeed,
     });
 
-    await runSandboxPiAgent({
+    // Kick off the long-running script. Don't await; we resolve from the
+    // first `pilab_turn_complete` event instead.
+    const scriptDone = runSandboxPiAgent({
       workspace: sandbox,
       runId: spec.agentRunId,
       provider: "openrouter",
-      // Pass the full OpenRouter slashed id (e.g. "x-ai/grok-4"). The sandbox script
-      // tries the built-in registry first and dynamically registers the model otherwise.
       modelName: spec.modelId,
       prompt,
       systemPrompt,
@@ -375,61 +489,89 @@ async function runPlaygroundAgent(input: {
       timeoutMs: maxWallClockSeconds * 1000,
       signal: localController.signal,
       cwd: worktreePath,
+      followUpInboxPath,
       onEvent: (sdkEvent: unknown) => {
+        if (isTurnCompleteEvent(sdkEvent)) {
+          const turn = typeof sdkEvent.turn === "number" ? sdkEvent.turn : 1;
+          turnInFlight = turnInFlight.then(() => handleTurnComplete(turn));
+          return;
+        }
         const mapped = mapPiSdkEventToPlayground(sdkEvent);
         if (!mapped) return;
         if (mapped.textDelta) textChunks.push(mapped.textDelta);
         void postEvent(ctx, { kind: mapped.kind, payload: mapped.payload }, nextSeq());
       },
+    }).catch(async (err: unknown) => {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (!firstTurnDone) {
+        // Make sure the playground transcript records the failure even when
+        // it happens before the first turn ever completes.
+        try {
+          await event("error", { error: errorMessage });
+          const output = textChunks.join("");
+          await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+        } finally {
+          firstTurnDone = true;
+          const cancelled = localController.signal.aborted && !signal.aborted;
+          firstTurnReject(new Error(cancelled ? "cancelled_by_user" : errorMessage));
+        }
+      } else {
+        console.warn(`[playground-runner] script for ${spec.agentRunId.slice(0, 8)} exited after first turn: ${errorMessage}`);
+      }
     });
 
-    // The agent's loop has returned. It may have backgrounded a server that's
-    // still binding — poll for up to ~15 s before giving up so brief startup
-    // latency doesn't strip the URL off the run.
-    await event("status", { status: "resolving_url" });
-    const resolvedUrl = await pollForListeningPort(sandbox, assignedPort, appUrl);
-    if (resolvedUrl) {
-      await event("port_open", { port: assignedPort });
-      await event("url_resolved", { url: resolvedUrl });
-    }
+    // Make sure listeners on `scriptDone` resolve cleanly even if the catch
+    // above swallows an error after the first turn.
+    const scriptDoneCleaned = scriptDone.then(
+      () => undefined,
+      () => undefined,
+    );
 
-    // Snapshot the agent's worktree: file count and source LOC. The numbers
-    // power the Score-step comparison tiles and the leaderboard cost row.
-    const stats = await snapshotWorktreeStats(sandbox, worktreePath);
-
-    const output = textChunks.join("");
-
-    await postRunUpdate(ctx, {
-      status: "succeeded",
-      output,
-      ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
-      ...(stats.fileCount != null ? { fileCount: stats.fileCount } : {}),
-      ...(stats.loc != null ? { loc: stats.loc } : {}),
-      finishedAt: new Date().toISOString(),
-    });
-
-    return { agentRunId: spec.agentRunId, status: "succeeded", appUrl: resolvedUrl, output };
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    await event("error", { error: errorMessage });
-    const output = textChunks.join("");
-    await postRunUpdate(ctx, {
-      status: "failed",
-      output,
-      finishedAt: new Date().toISOString(),
-    });
-    const cancelled = localController.signal.aborted && !signal.aborted;
-    return {
+    const result = await firstTurnPromise.catch((err: unknown): AgentRunResult => ({
       agentRunId: spec.agentRunId,
-      status: cancelled ? "failed" : signal.aborted ? "timed_out" : "failed",
+      status: "failed",
       appUrl: null,
-      output,
-      errorMessage: cancelled ? "cancelled_by_user" : errorMessage,
+      output: textChunks.join(""),
+      errorMessage: err instanceof Error ? err.message : String(err),
+    }));
+
+    return {
+      result,
+      inbox,
+      scriptDone: scriptDoneCleaned.finally(() => {
+        signal.removeEventListener("abort", abortLocal);
+        unregister();
+      }),
     };
-  } finally {
+  } catch (err) {
     signal.removeEventListener("abort", abortLocal);
     unregister();
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    const output = textChunks.join("");
+    try { await event("error", { error: errorMessage }); } catch { /* ignore */ }
+    try {
+      await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+    } catch { /* ignore */ }
+    return {
+      result: {
+        agentRunId: spec.agentRunId,
+        status: "failed",
+        appUrl: null,
+        output,
+        errorMessage,
+      },
+      inbox,
+      scriptDone: Promise.resolve(),
+    };
   }
+}
+
+function isTurnCompleteEvent(value: unknown): value is { type: "pilab_turn_complete"; turn?: number; status?: string; message?: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "pilab_turn_complete"
+  );
 }
 
 // ── System prompt builder ───────────────────────────────────────────────────

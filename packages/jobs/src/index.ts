@@ -33,6 +33,7 @@ export {
   PLAYGROUND_RUN_JOB_NAME,
   PLAYGROUND_RELEASE_CHANNEL,
   PLAYGROUND_CANCEL_RUN_CHANNEL,
+  PLAYGROUND_FOLLOW_UP_CHANNEL,
   createPlaygroundQueue,
   createPlaygroundWorker,
   createPlaygroundQueueEvents,
@@ -42,6 +43,7 @@ export {
   getPlaygroundSessionJobSummary,
   publishPlaygroundRelease,
   publishPlaygroundCancelRun,
+  publishPlaygroundFollowUp,
   summarizePlaygroundJob,
 } from "./playground.js";
 

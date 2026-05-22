@@ -744,6 +744,35 @@ export async function stopPlaygroundAgentRun(sessionId: string, agentRunId: stri
   return response.json() as Promise<{ cancelling: boolean }>;
 }
 
+export class PlaygroundFollowUpError extends Error {
+  constructor(public readonly kind: "sandbox_released" | "other", message: string) {
+    super(message);
+  }
+}
+
+export async function sendPlaygroundFollowUp(
+  sessionId: string,
+  agentRunId: string,
+  text: string,
+) {
+  const response = await fetch(
+    `${getApiBaseUrl()}/playground/${sessionId}/runs/${agentRunId}/follow-up`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    if (response.status === 409) {
+      throw new PlaygroundFollowUpError("sandbox_released", "sandbox_released");
+    }
+    throw new PlaygroundFollowUpError("other", message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ accepted: boolean; eventId: string }>;
+}
+
 export async function listSavedPlaygroundSessions() {
   const response = await fetch(`${getApiBaseUrl()}/playground/saved`, { cache: "no-store" });
   if (!response.ok) {

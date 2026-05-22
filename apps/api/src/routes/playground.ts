@@ -12,6 +12,7 @@ import {
   createRedisConnection,
   enqueuePlaygroundSessionJob,
   publishPlaygroundCancelRun,
+  publishPlaygroundFollowUp,
   publishPlaygroundRelease,
   type PlaygroundSandboxImage,
 } from "@pilab/jobs";
@@ -606,6 +607,106 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
       await publishPlaygroundCancelRun(connection, sessionId, runId);
       reply.code(202);
       return { cancelling: true };
+    },
+  );
+
+  // POST /playground/:id/runs/:runId/follow-up — append a user turn to a running agent
+  fastify.post<{
+    Params: { id: string; runId: string };
+    Body: { text: string };
+  }>(
+    "/playground/:id/runs/:runId/follow-up",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["text"],
+          additionalProperties: false,
+          properties: {
+            text: { type: "string", minLength: 1, maxLength: 4000 },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const { id: sessionId, runId } = request.params;
+      const text = request.body.text;
+
+      const [run] = await fastify.db
+        .select({
+          id: playgroundAgentRuns.id,
+          sandboxId: playgroundAgentRuns.sandboxId,
+        })
+        .from(playgroundAgentRuns)
+        .where(
+          and(
+            eq(playgroundAgentRuns.id, runId),
+            eq(playgroundAgentRuns.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+
+      if (!run) {
+        reply.code(404);
+        throw new Error(`Agent run not found: ${runId}`);
+      }
+      if (!run.sandboxId) {
+        reply.code(409);
+        throw new Error("sandbox_released");
+      }
+
+      // Persist the user turn immediately so the transcript reflects it before
+      // the worker has even processed the pub/sub message.
+      const [maxRow] = await fastify.db
+        .select({ value: sql<number>`COALESCE(MAX(${playgroundEvents.seq}), 0)` })
+        .from(playgroundEvents)
+        .where(eq(playgroundEvents.agentRunId, runId));
+      const nextSeq = (Number(maxRow?.value) || 0) + 1;
+
+      const [inserted] = await fastify.db
+        .insert(playgroundEvents)
+        .values({
+          agentRunId: runId,
+          seq: nextSeq,
+          kind: "user_follow_up",
+          payload: { text },
+        })
+        .returning();
+
+      if (!inserted) {
+        throw new Error("Failed to persist follow-up event");
+      }
+
+      // Broadcast to WebSocket subscribers so live viewers see the bubble.
+      // Mirror the wrapper shape used by POST /playground/:id/events so the
+      // browser-side parser in `openPlaygroundEventStream` picks it up.
+      options.eventBus.publish({
+        id: inserted.id,
+        runId: sessionId,
+        type: "log",
+        payload: {
+          source: "playground",
+          eventId: inserted.id,
+          agentRunId: inserted.agentRunId,
+          seq: inserted.seq,
+          kind: inserted.kind,
+          timestamp: inserted.ts.toISOString(),
+          payload: inserted.payload,
+        },
+        receivedAt: inserted.ts.toISOString(),
+      });
+
+      // Flip the agent back into a running state so the UI shows the spinner /
+      // pulse while the next turn streams in.
+      await fastify.db
+        .update(playgroundAgentRuns)
+        .set({ status: "running" })
+        .where(eq(playgroundAgentRuns.id, runId));
+
+      await publishPlaygroundFollowUp(connection, sessionId, runId, text);
+
+      reply.code(202);
+      return { accepted: true, eventId: inserted.id };
     },
   );
 

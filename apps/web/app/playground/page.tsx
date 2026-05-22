@@ -24,6 +24,8 @@ import {
   unsavePlaygroundSession,
   releasePlaygroundSandbox,
   stopPlaygroundAgentRun,
+  sendPlaygroundFollowUp,
+  PlaygroundFollowUpError,
   type ModelInfo,
   type PlaygroundAutograderRunResponse,
   type PlaygroundSessionResponse,
@@ -243,6 +245,22 @@ export default function PlaygroundPage() {
     }
   }
 
+  async function handleSendFollowUp(agentRunId: string, text: string) {
+    if (!session) return;
+    try {
+      await sendPlaygroundFollowUp(session.id, agentRunId, text);
+    } catch (err) {
+      // The AgentPanel's input surfaces its own inline error, but mirror
+      // non-sandbox-released failures into the page-level banner so the user
+      // sees something even if their focus is elsewhere.
+      if (err instanceof PlaygroundFollowUpError && err.kind === "sandbox_released") {
+        throw err;
+      }
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  }
+
   function handleContinueToScoring() {
     if (!session) return;
     void releasePlaygroundSandbox(session.id).catch(() => undefined);
@@ -358,6 +376,8 @@ export default function PlaygroundPage() {
             allFailed={allFailed}
             onContinue={handleContinueToScoring}
             onStopAgent={handleStopAgent}
+            onSendFollowUp={handleSendFollowUp}
+            sandboxReleased={session.status === "completed"}
           />
         </>
       )}
