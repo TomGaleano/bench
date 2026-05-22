@@ -61,6 +61,41 @@ type RunUpdateBody = {
   loc?: number;
 };
 
+async function pollForListeningPort(
+  sandbox: RuntimeWorkspace,
+  port: number,
+  appUrl: string,
+): Promise<string | null> {
+  // Roughly 15 seconds: 8 attempts with 2 s gap. Each command is fast so the
+  // wall-clock cost is mostly idle wait, which is also when the user is
+  // staring at the live grid waiting for the iframe to be useful.
+  const attempts = 8;
+  const intervalMs = 2_000;
+  // Prefer `ss` because it works on every modern Linux base image; fall back
+  // to `netstat` (busybox) or to `/proc/net/tcp` parsing if neither is
+  // installed. We ask for any of them in one composite command so we only
+  // round-trip once per poll.
+  const probe = [
+    `(ss -tln 2>/dev/null | awk 'NR>1 {print $4}'`,
+    `|| netstat -tln 2>/dev/null | awk 'NR>2 {print $4}'`,
+    `|| awk '/:/{print $2}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -F: '{print strtonum("0x"$2)}')`,
+    `| sed 's/.*://' | sort -u`,
+  ].join(" ");
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const res = await sandbox.run({ command: probe, timeoutMs: 5_000 });
+    const open = res.stdout
+      .split("\n")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 1024 && n < 65535);
+    if (open.includes(port)) return appUrl;
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  return null;
+}
+
 async function snapshotWorktreeStats(
   sandbox: RuntimeWorkspace,
   worktreePath: string,
@@ -348,19 +383,11 @@ async function runPlaygroundAgent(input: {
       },
     });
 
-    // Is the agent's assigned port now listening?
+    // The agent's loop has returned. It may have backgrounded a server that's
+    // still binding — poll for up to ~15 s before giving up so brief startup
+    // latency doesn't strip the URL off the run.
     await event("status", { status: "resolving_url" });
-    const portCheck = await sandbox.run({
-      command: `ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | sed 's/.*://' | sort -u || true`,
-      timeoutMs: 5_000,
-    });
-    const openPorts = new Set(
-      portCheck.stdout
-        .split("\n")
-        .map((s) => Number(s.trim()))
-        .filter((n) => Number.isInteger(n) && n > 1024 && n < 65535),
-    );
-    const resolvedUrl = openPorts.has(assignedPort) ? appUrl : null;
+    const resolvedUrl = await pollForListeningPort(sandbox, assignedPort, appUrl);
     if (resolvedUrl) {
       await event("port_open", { port: assignedPort });
       await event("url_resolved", { url: resolvedUrl });
@@ -443,7 +470,7 @@ function buildSystemPrompt(env: {
     `- Build a complete, working application that satisfies the user's prompt.`,
     `- Prefer a small set of files in a single directory. Use whatever stack fits the task.`,
     `- If you start a web server, bind to **0.0.0.0:${env.assignedPort}** and leave it running so the human grader can open ${env.appUrl}.`,
-    `- Verify your work briefly (curl, --help, smoke tests) before finishing.`,
+    `- Start the server in the background (e.g. \`nohup python3 app.py > server.log 2>&1 &\`), then **verify it is actually listening** with \`curl -fsS http://127.0.0.1:${env.assignedPort}/ -o /dev/null && echo LISTENING\` before writing your FINAL message. If curl fails, fix the server first.`,
     `- When you are done, write a final message starting with **"FINAL:"** that summarizes what you built, how to run it, and (if it's a server) includes the public URL ${env.appUrl}.`,
   ].join("\n");
 }

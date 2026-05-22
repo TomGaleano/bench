@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type {
   ModelInfo,
@@ -36,11 +37,13 @@ export function ScoreStep({
   onAutoGrade,
   isGrading,
 }: ScoreStepProps) {
+  const router = useRouter();
   const [values, setValues] = useState<Record<string, ScorecardValue>>({});
   const [primaryGrader, setPrimaryGrader] = useState(
     session.graderModelId ?? "anthropic/claude-haiku-4",
   );
   const [submitting, setSubmitting] = useState(false);
+  const [submitNotice, setSubmitNotice] = useState<string | null>(null);
   const [showAutograder, setShowAutograder] = useState(autograders.length > 0);
 
   useEffect(() => {
@@ -56,6 +59,7 @@ export function ScoreStep({
 
   async function handleSubmit() {
     setSubmitting(true);
+    setSubmitNotice(null);
     try {
       const payload: PlaygroundScoreInput[] = scorableRuns.map((r) => {
         const v = values[r.id];
@@ -70,6 +74,14 @@ export function ScoreStep({
         };
       });
       await onSubmit(payload);
+      setSubmitNotice("Scores saved — opening the saved-session view…");
+      // Drop into the read-only saved view; it shows the persisted scores +
+      // an autograde panel + the share/tag controls.
+      router.push(`/playground/${session.id}`);
+    } catch (err) {
+      setSubmitNotice(
+        err instanceof Error ? `Couldn't save scores: ${err.message}` : "Couldn't save scores.",
+      );
     } finally {
       setSubmitting(false);
     }
@@ -136,6 +148,16 @@ export function ScoreStep({
             {scorableRuns.length}
           </b>{" "}
           of {session.agentRuns.length} eligible · {session.agentRuns.length - scorableRuns.length} skipped
+          {submitNotice && (
+            <span
+              style={{
+                marginLeft: 10,
+                color: submitNotice.startsWith("Couldn") ? "var(--err)" : "var(--ok)",
+              }}
+            >
+              · {submitNotice}
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {!showAutograder && (
