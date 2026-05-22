@@ -55,6 +55,9 @@ export const playgroundSessions = pgTable("playground_sessions", {
   sandboxImage: text("sandbox_image"),
   seedPromptText: text("seed_prompt_text"),
   runTwiceAndAverage: boolean("run_twice_and_average").notNull().default(false),
+  title: text("title"),
+  tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
+  shareToken: text("share_token"),
 });
 
 export const playgroundAgentRuns = pgTable("playground_agent_runs", {

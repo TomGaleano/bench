@@ -1,4 +1,4 @@
-import { and, asc, eq, desc, inArray } from "drizzle-orm";
+import { and, arrayOverlaps, asc, eq, desc, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import {
   playgroundSessions,
@@ -79,6 +79,9 @@ type PlaygroundSessionResponse = {
   createdAt: string;
   completedAt: string | null;
   saved: boolean;
+  title: string | null;
+  tags: string[];
+  shareToken: string | null;
   agentRuns: Array<{
     id: string;
     modelId: string;
@@ -289,21 +292,88 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
     },
   );
 
-  // GET /playground — list sessions
-  fastify.get<{ Reply: PlaygroundSessionResponse[] }>(
+  // GET /playground — list sessions with optional filters
+  fastify.get<{
+    Querystring: {
+      model?: string;
+      tag?: string;
+      starred?: string;
+      minScore?: string;
+      from?: string;
+      to?: string;
+      limit?: string;
+    };
+    Reply: PlaygroundSessionResponse[];
+  }>(
     "/playground",
-    async () => {
-      const sessions = await fastify.db
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            model: { type: "string" },
+            tag: { type: "string" },
+            starred: { type: "string" },
+            minScore: { type: "string" },
+            from: { type: "string" },
+            to: { type: "string" },
+            limit: { type: "string" },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const q = request.query;
+      const limit = Math.min(Math.max(Number.parseInt(q.limit ?? "50", 10) || 50, 1), 200);
+
+      const conditions = [];
+
+      if (q.starred === "true") conditions.push(eq(playgroundSessions.saved, true));
+      if (q.starred === "false") conditions.push(eq(playgroundSessions.saved, false));
+      if (q.from) {
+        const d = new Date(q.from);
+        if (Number.isFinite(d.getTime())) conditions.push(gte(playgroundSessions.createdAt, d));
+      }
+      if (q.to) {
+        const d = new Date(q.to);
+        if (Number.isFinite(d.getTime())) conditions.push(lte(playgroundSessions.createdAt, d));
+      }
+      if (q.tag) {
+        conditions.push(arrayOverlaps(playgroundSessions.tags, [q.tag]));
+      }
+
+      let sessionsQuery = fastify.db
         .select()
         .from(playgroundSessions)
+        .$dynamic();
+
+      if (conditions.length > 0) {
+        sessionsQuery = sessionsQuery.where(and(...conditions));
+      }
+
+      const sessions = await sessionsQuery
         .orderBy(desc(playgroundSessions.createdAt))
-        .limit(25);
+        .limit(limit);
 
-      const results = await Promise.all(
-        sessions.map((s) => buildSessionResponse(fastify, s.id)),
-      );
+      // The model and minScore filters touch agent_runs; apply them as a
+      // post-filter after we've enriched the rows. Both are rare enough
+      // that the extra in-memory pass is fine for ≤200 sessions.
+      const enriched = (
+        await Promise.all(sessions.map((s) => buildSessionResponse(fastify, s.id)))
+      ).filter((r): r is PlaygroundSessionResponse => r !== null);
 
-      return results.filter((r): r is PlaygroundSessionResponse => r !== null);
+      const minScoreNum = q.minScore ? Number.parseInt(q.minScore, 10) : null;
+      return enriched.filter((s) => {
+        if (q.model && !s.agentRuns.some((r) => r.modelId === q.model)) return false;
+        if (minScoreNum != null && Number.isFinite(minScoreNum)) {
+          const best = s.agentRuns.reduce(
+            (acc, r) => (r.score != null && r.score > acc ? r.score : acc),
+            -Infinity,
+          );
+          if (best < minScoreNum) return false;
+        }
+        return true;
+      });
     },
   );
 
@@ -873,6 +943,143 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
       return { saved: false };
     },
   );
+
+  // PATCH /playground/:id — update title, tags, saved, share token
+  fastify.patch<{
+    Params: { id: string };
+    Body: {
+      title?: string | null;
+      tags?: string[];
+      saved?: boolean;
+      shareEnabled?: boolean;
+    };
+  }>(
+    "/playground/:id",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: ["string", "null"], maxLength: 200 },
+            tags: { type: "array", items: { type: "string", maxLength: 64 }, maxItems: 16 },
+            saved: { type: "boolean" },
+            shareEnabled: { type: "boolean" },
+          },
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      const update: Partial<typeof playgroundSessions.$inferInsert> = {};
+      if (body.title !== undefined) update.title = body.title;
+      if (body.tags !== undefined) {
+        update.tags = Array.from(new Set(body.tags.map((t) => t.trim().toLowerCase()).filter(Boolean)));
+      }
+      if (body.saved !== undefined) update.saved = body.saved;
+      if (body.shareEnabled !== undefined) {
+        update.shareToken = body.shareEnabled ? randomUUID().replace(/-/g, "") : null;
+      }
+
+      if (Object.keys(update).length > 0) {
+        await fastify.db
+          .update(playgroundSessions)
+          .set(update)
+          .where(eq(playgroundSessions.id, request.params.id));
+      }
+
+      const response = await buildSessionResponse(fastify, request.params.id);
+      if (!response) {
+        reply.code(404);
+        throw new Error("Session not found");
+      }
+      return response;
+    },
+  );
+
+  // GET /playground/leaderboard?window=7d|30d|90d — model aggregates
+  fastify.get<{
+    Querystring: { window?: string; metric?: string };
+  }>(
+    "/playground/leaderboard",
+    async (request) => {
+      const window = request.query.window === "7d" || request.query.window === "30d" ? request.query.window : "90d";
+      const days = window === "7d" ? 7 : window === "30d" ? 30 : 90;
+
+      // We avoid drizzle's query builder here: the aggregate uses a CTE that's
+      // simpler to express as raw SQL than to fight the type plumbing for.
+      const rows = await fastify.db.execute(sql`
+        WITH per_session AS (
+          SELECT
+            par.model_id,
+            par.model_name,
+            par.session_id,
+            AVG(par.score)::numeric(6, 2) AS session_score,
+            MAX(CASE WHEN par.score = sub.max_score THEN 1 ELSE 0 END) AS win_in_session
+          FROM playground_agent_runs par
+          JOIN (
+            SELECT session_id, MAX(score) AS max_score
+            FROM playground_agent_runs
+            WHERE score IS NOT NULL
+            GROUP BY session_id
+          ) sub USING (session_id)
+          WHERE par.score IS NOT NULL
+            AND par.created_at >= now() - (${days}::int * interval '1 day')
+          GROUP BY par.model_id, par.model_name, par.session_id, sub.max_score
+        )
+        SELECT
+          model_id,
+          MAX(model_name) AS model_name,
+          COUNT(*)::int AS sessions_played,
+          ROUND(AVG(session_score), 1)::float8 AS avg_score,
+          ROUND(100.0 * SUM(win_in_session) / NULLIF(COUNT(*), 0), 1)::float8 AS win_rate
+        FROM per_session
+        GROUP BY model_id
+        ORDER BY win_rate DESC NULLS LAST, avg_score DESC NULLS LAST
+      `);
+
+      return {
+        window,
+        rows: (rows as unknown as Array<{
+          model_id: string;
+          model_name: string;
+          sessions_played: number;
+          avg_score: number | null;
+          win_rate: number | null;
+        }>).map((r) => ({
+          modelId: r.model_id,
+          modelName: r.model_name,
+          sessionsPlayed: r.sessions_played,
+          avgScore: r.avg_score,
+          winRate: r.win_rate,
+        })),
+      };
+    },
+  );
+
+  // GET /playground/share/:token — public read-only session view
+  fastify.get<{ Params: { token: string } }>(
+    "/playground/share/:token",
+    async (request, reply) => {
+      const [row] = await fastify.db
+        .select({ id: playgroundSessions.id })
+        .from(playgroundSessions)
+        .where(eq(playgroundSessions.shareToken, request.params.token))
+        .limit(1);
+
+      if (!row) {
+        reply.code(404);
+        throw new Error("Share link not found");
+      }
+
+      const response = await buildSessionResponse(fastify, row.id);
+      if (!response) {
+        reply.code(404);
+        throw new Error("Share link not found");
+      }
+      return response;
+    },
+  );
 };
 
 async function buildSessionResponse(
@@ -902,6 +1109,9 @@ async function buildSessionResponse(
     createdAt: session.createdAt.toISOString(),
     completedAt: session.completedAt?.toISOString() ?? null,
     saved: session.saved,
+    title: session.title,
+    tags: session.tags ?? [],
+    shareToken: session.shareToken,
     agentRuns: runs.map((r) => ({
       id: r.id,
       modelId: r.modelId,

@@ -518,8 +518,89 @@ export type PlaygroundSessionResponse = {
   createdAt: string;
   completedAt: string | null;
   saved: boolean;
+  title: string | null;
+  tags: string[];
+  shareToken: string | null;
   agentRuns: PlaygroundAgentRunResponse[];
 };
+
+export type PlaygroundLeaderboardRow = {
+  modelId: string;
+  modelName: string;
+  sessionsPlayed: number;
+  avgScore: number | null;
+  winRate: number | null;
+};
+
+export type PlaygroundLeaderboardResponse = {
+  window: "7d" | "30d" | "90d";
+  rows: PlaygroundLeaderboardRow[];
+};
+
+export type PlaygroundHistoryFilters = {
+  model?: string;
+  tag?: string;
+  starred?: boolean;
+  minScore?: number;
+  from?: string;
+  to?: string;
+  limit?: number;
+};
+
+export async function listPlaygroundHistory(filters: PlaygroundHistoryFilters = {}) {
+  const qs = new URLSearchParams();
+  if (filters.model) qs.set("model", filters.model);
+  if (filters.tag) qs.set("tag", filters.tag);
+  if (filters.starred !== undefined) qs.set("starred", String(filters.starred));
+  if (filters.minScore != null) qs.set("minScore", String(filters.minScore));
+  if (filters.from) qs.set("from", filters.from);
+  if (filters.to) qs.set("to", filters.to);
+  if (filters.limit) qs.set("limit", String(filters.limit));
+  const url = `${getApiBaseUrl()}/playground${qs.toString() ? `?${qs.toString()}` : ""}`;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundSessionResponse[]>;
+}
+
+export async function getPlaygroundLeaderboard(window: "7d" | "30d" | "90d" = "90d") {
+  const response = await fetch(
+    `${getApiBaseUrl()}/playground/leaderboard?window=${window}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundLeaderboardResponse>;
+}
+
+export async function patchPlaygroundSession(
+  sessionId: string,
+  patch: { title?: string | null; tags?: string[]; saved?: boolean; shareEnabled?: boolean },
+) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundSessionResponse>;
+}
+
+export async function getSharedPlaygroundSession(token: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/share/${token}`, { cache: "no-store" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundSessionResponse>;
+}
 
 export type PlaygroundEventResponse = {
   id: string;

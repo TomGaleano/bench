@@ -78,6 +78,13 @@
       "when": 1779800000000,
       "tag": "0010_playground_rubric",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1779900000000,
+      "tag": "0011_playground_tags_and_leaderboard",
+      "breakpoints": true
     }
   ]
 }

@@ -6,6 +6,7 @@ import { Hero } from "../../components/ui/Hero";
 import { ComposeStep } from "../../components/playground/ComposeStep";
 import { LiveStep } from "../../components/playground/LiveStep";
 import { ScoreStep } from "../../components/playground/ScoreStep";
+import { NoModelsState, AllAgentsFailedState } from "../../components/playground/ErrorStates";
 import {
   PLAYGROUND_ADVANCED_DEFAULTS,
   type PlaygroundAdvancedOptions,
@@ -311,34 +312,54 @@ export default function PlaygroundPage() {
       )}
 
       {step === "compose" && (
-        <ComposeStep
-          models={models}
-          prompt={prompt}
-          onPromptChange={setPrompt}
-          selectedModels={selectedModels}
-          onToggleModel={toggleModel}
-          onApplyPreset={applyPreset}
-          onRemoveSelected={removeSelected}
-          graderModelId={graderModelId}
-          onGraderModelIdChange={setGraderModelId}
-          advanced={advanced}
-          onAdvancedChange={setAdvanced}
-          canLaunch={canLaunch}
-          launching={launching}
-          onLaunch={handleLaunch}
-        />
+        <>
+          {models.length === 0 && (
+            <div className="pg-err-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 16 }}>
+              <NoModelsState onRetry={() => void listModels().then(setModels).catch(() => undefined)} />
+            </div>
+          )}
+          <ComposeStep
+            models={models}
+            prompt={prompt}
+            onPromptChange={setPrompt}
+            selectedModels={selectedModels}
+            onToggleModel={toggleModel}
+            onApplyPreset={applyPreset}
+            onRemoveSelected={removeSelected}
+            graderModelId={graderModelId}
+            onGraderModelIdChange={setGraderModelId}
+            advanced={advanced}
+            onAdvancedChange={setAdvanced}
+            canLaunch={canLaunch}
+            launching={launching}
+            onLaunch={handleLaunch}
+          />
+        </>
       )}
 
       {step === "live" && session && (
-        <LiveStep
-          session={session}
-          events={sessionEvents}
-          maxWallClockSeconds={advanced.maxWallClockSeconds}
-          allCompleted={allCompleted}
-          allFailed={allFailed}
-          onContinue={handleContinueToScoring}
-          onStopAgent={handleStopAgent}
-        />
+        <>
+          {allFailed && (
+            <div className="pg-err-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 16 }}>
+              <AllAgentsFailedState
+                failures={session.agentRuns.map((r) => ({
+                  modelName: r.modelName,
+                  reason: r.scoreRationale ?? "no output",
+                }))}
+                onRetry={() => setStep("compose")}
+              />
+            </div>
+          )}
+          <LiveStep
+            session={session}
+            events={sessionEvents}
+            maxWallClockSeconds={advanced.maxWallClockSeconds}
+            allCompleted={allCompleted}
+            allFailed={allFailed}
+            onContinue={handleContinueToScoring}
+            onStopAgent={handleStopAgent}
+          />
+        </>
       )}
 
       {step === "score" && session && (
