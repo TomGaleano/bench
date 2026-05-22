@@ -47,6 +47,12 @@ export const playgroundSessions = pgTable("playground_sessions", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   saved: boolean("saved").notNull().default(false),
+  maxWallClockSeconds: integer("max_wall_clock_seconds"),
+  maxOutputTokensPerAgent: integer("max_output_tokens_per_agent"),
+  tools: text("tools").array(),
+  sandboxImage: text("sandbox_image"),
+  seedPromptText: text("seed_prompt_text"),
+  runTwiceAndAverage: boolean("run_twice_and_average").notNull().default(false),
 });
 
 export const playgroundAgentRuns = pgTable("playground_agent_runs", {
@@ -66,6 +72,8 @@ export const playgroundAgentRuns = pgTable("playground_agent_runs", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
+  parentAgentRunId: uuid("parent_agent_run_id"),
+  cancellationReason: text("cancellation_reason"),
 });
 
 export const playgroundEvents = pgTable("playground_events", {

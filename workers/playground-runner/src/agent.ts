@@ -15,6 +15,12 @@ const PLAYGROUND_TOOLS = ["read", "write", "edit", "grep", "find", "ls", "bash"]
 const PLAYGROUND_ROOT = "/home/user/playground";
 const BASE_PORT = 30000;
 
+function sanitizeTools(tools: string[] | undefined): string[] {
+  if (!tools || tools.length === 0) return PLAYGROUND_TOOLS;
+  const filtered = tools.filter((t) => PLAYGROUND_TOOLS.includes(t) || t === "network");
+  return filtered.length > 0 ? filtered : PLAYGROUND_TOOLS;
+}
+
 export type AgentRunSpec = {
   agentRunId: string;
   modelId: string;
@@ -67,8 +73,34 @@ export async function runPlaygroundSession(input: {
   signal: AbortSignal;
   /** Resolves when the API publishes a release signal for this session, or on internal timeout. */
   waitForRelease(sessionId: string, timeoutMs: number): Promise<void>;
+  /** Hook for the worker to register a per-agent AbortController so cancel-run signals can hit it. */
+  registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
+  tools?: string[];
+  seedPromptText?: string;
+  sandboxImage?: string;
 }): Promise<{ sandboxId: string | null; agentResults: AgentRunResult[] }> {
-  const { apiBaseUrl, sessionId, prompt, agentRuns, apiKey, maxWallClockSeconds, maxReviewSeconds, signal, waitForRelease } = input;
+  const {
+    apiBaseUrl,
+    sessionId,
+    prompt,
+    agentRuns,
+    apiKey,
+    maxWallClockSeconds,
+    maxReviewSeconds,
+    signal,
+    waitForRelease,
+    registerAgentSignal,
+    tools,
+    seedPromptText,
+    sandboxImage,
+  } = input;
+
+  const allowedTools = sanitizeTools(tools);
+  if (sandboxImage && sandboxImage !== "py-node") {
+    console.log(
+      `[playground-runner] session ${sessionId.slice(0, 8)} requested sandbox image "${sandboxImage}" — only py-node is wired up; using default.`,
+    );
+  }
 
   let sandbox: RuntimeWorkspace | null = null;
   const peerNames = agentRuns.map((a) => a.modelName);
@@ -137,6 +169,21 @@ export async function runPlaygroundSession(input: {
       if (wt.exitCode !== 0) {
         throw new Error(`worktree add for ${plan.branch} failed: ${wt.stderr || wt.stdout}`);
       }
+
+      // If the user supplied a seed prompt, drop it into each worktree as SEED.md
+      // before the agent starts so its first read pass picks it up.
+      if (seedPromptText && seedPromptText.trim().length > 0) {
+        const encoded = Buffer.from(seedPromptText, "utf8").toString("base64");
+        const seed = await sandbox.run({
+          command: `echo '${encoded}' | base64 -d > ${plan.worktreePath}/SEED.md`,
+          timeoutMs: 15_000,
+        });
+        if (seed.exitCode !== 0) {
+          console.warn(
+            `[playground-runner] failed to write SEED.md for ${plan.branch}: ${seed.stderr || seed.stdout}`,
+          );
+        }
+      }
     }
 
     // Run all agents in parallel.
@@ -158,6 +205,9 @@ export async function runPlaygroundSession(input: {
           apiKey,
           maxWallClockSeconds,
           signal,
+          tools: allowedTools,
+          hasSeed: Boolean(seedPromptText && seedPromptText.trim().length > 0),
+          ...(registerAgentSignal ? { registerAgentSignal } : {}),
         }).catch((err): AgentRunResult => ({
           agentRunId: plan.spec.agentRunId,
           status: "failed",
@@ -201,18 +251,28 @@ async function runPlaygroundAgent(input: {
   apiKey: string;
   maxWallClockSeconds: number;
   signal: AbortSignal;
+  tools: string[];
+  hasSeed: boolean;
+  registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
 }): Promise<AgentRunResult> {
   const {
     apiBaseUrl, sessionId, sandbox, prompt,
     spec, index, totalAgents, peers,
     worktreePath, branch, assignedPort, appUrl,
     apiKey, maxWallClockSeconds, signal,
+    tools, hasSeed, registerAgentSignal,
   } = input;
 
   const ctx = { apiBaseUrl, sessionId, agentRunId: spec.agentRunId };
   let seq = 1;
   const nextSeq = () => ++seq;
   const textChunks: string[] = [];
+
+  // Local AbortController chained off the session signal so cancel-run can target one agent.
+  const localController = new AbortController();
+  const abortLocal = () => localController.abort();
+  signal.addEventListener("abort", abortLocal, { once: true });
+  const unregister = registerAgentSignal?.(spec.agentRunId, abortLocal) ?? (() => undefined);
 
   const event = async (kind: AppendEventBody["kind"], payload: Record<string, unknown>) => {
     await postEvent(ctx, { kind, payload }, nextSeq());
@@ -237,6 +297,7 @@ async function runPlaygroundAgent(input: {
       branch,
       assignedPort,
       appUrl,
+      hasSeed,
     });
 
     await runSandboxPiAgent({
@@ -249,9 +310,9 @@ async function runPlaygroundAgent(input: {
       prompt,
       systemPrompt,
       apiKey,
-      tools: PLAYGROUND_TOOLS,
+      tools,
       timeoutMs: maxWallClockSeconds * 1000,
-      signal,
+      signal: localController.signal,
       cwd: worktreePath,
       onEvent: (sdkEvent: unknown) => {
         const mapped = mapPiSdkEventToPlayground(sdkEvent);
@@ -298,13 +359,17 @@ async function runPlaygroundAgent(input: {
       output,
       finishedAt: new Date().toISOString(),
     });
+    const cancelled = localController.signal.aborted && !signal.aborted;
     return {
       agentRunId: spec.agentRunId,
-      status: signal.aborted ? "timed_out" : "failed",
+      status: cancelled ? "failed" : signal.aborted ? "timed_out" : "failed",
       appUrl: null,
       output,
-      errorMessage,
+      errorMessage: cancelled ? "cancelled_by_user" : errorMessage,
     };
+  } finally {
+    signal.removeEventListener("abort", abortLocal);
+    unregister();
   }
 }
 
@@ -319,14 +384,18 @@ function buildSystemPrompt(env: {
   branch: string;
   assignedPort: number;
   appUrl: string;
+  hasSeed?: boolean;
 }): string {
   const peerLine = env.peers.length > 0
     ? `Competing agents in this session: ${env.peers.join(", ")}.`
     : `You are the only agent in this session.`;
+  const seedLine = env.hasSeed
+    ? `\nThere is a SEED.md file in your working directory that contains starter context for this task. Read it first before doing anything else.\n`
+    : "";
 
   return [
     `You are agent ${env.agentIndex + 1} of ${env.totalAgents} (${env.modelName}) in a head-to-head playground session. ${peerLine}`,
-    ``,
+    seedLine,
     `# Environment`,
     `You are running inside a shared E2B Linux sandbox with Python 3 and Node.js available. You share this sandbox with the other agents above.`,
     ``,

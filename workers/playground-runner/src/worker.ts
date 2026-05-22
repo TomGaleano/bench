@@ -1,6 +1,7 @@
 import { Worker } from "bullmq";
 import {
   createRedisConnection,
+  PLAYGROUND_CANCEL_RUN_CHANNEL,
   PLAYGROUND_QUEUE_NAME,
   PLAYGROUND_RELEASE_CHANNEL,
   PLAYGROUND_RUN_JOB_NAME,
@@ -32,19 +33,55 @@ const MAX_REVIEW_SECONDS = 30 * 60;
 // Map of sessionId → resolver fn waiting for the release signal.
 const pendingReleases = new Map<string, () => void>();
 
-releaseSubscriber.subscribe(PLAYGROUND_RELEASE_CHANNEL).then(() => {
-  console.log(`[playground-runner] subscribed to ${PLAYGROUND_RELEASE_CHANNEL}`);
-}).catch((err: unknown) => {
-  console.error(`[playground-runner] failed to subscribe to release channel:`, err);
-});
+// Map of sessionId → Map of agentRunId → abort handler.
+const pendingCancellations = new Map<string, Map<string, () => void>>();
 
-releaseSubscriber.on("message", (channel, sessionId) => {
-  if (channel !== PLAYGROUND_RELEASE_CHANNEL) return;
-  const resolver = pendingReleases.get(sessionId);
-  if (resolver) {
-    console.log(`[playground-runner] release signal received for ${sessionId.slice(0, 8)}`);
-    pendingReleases.delete(sessionId);
-    resolver();
+function registerAgentSignal(sessionId: string, agentRunId: string, abort: () => void): () => void {
+  let bucket = pendingCancellations.get(sessionId);
+  if (!bucket) {
+    bucket = new Map();
+    pendingCancellations.set(sessionId, bucket);
+  }
+  bucket.set(agentRunId, abort);
+  return () => {
+    const b = pendingCancellations.get(sessionId);
+    b?.delete(agentRunId);
+    if (b && b.size === 0) pendingCancellations.delete(sessionId);
+  };
+}
+
+releaseSubscriber
+  .subscribe(PLAYGROUND_RELEASE_CHANNEL, PLAYGROUND_CANCEL_RUN_CHANNEL)
+  .then(() => {
+    console.log(
+      `[playground-runner] subscribed to ${PLAYGROUND_RELEASE_CHANNEL}, ${PLAYGROUND_CANCEL_RUN_CHANNEL}`,
+    );
+  })
+  .catch((err: unknown) => {
+    console.error(`[playground-runner] failed to subscribe:`, err);
+  });
+
+releaseSubscriber.on("message", (channel, payload) => {
+  if (channel === PLAYGROUND_RELEASE_CHANNEL) {
+    const sessionId = payload;
+    const resolver = pendingReleases.get(sessionId);
+    if (resolver) {
+      console.log(`[playground-runner] release signal received for ${sessionId.slice(0, 8)}`);
+      pendingReleases.delete(sessionId);
+      resolver();
+    }
+    return;
+  }
+  if (channel === PLAYGROUND_CANCEL_RUN_CHANNEL) {
+    const [sessionId, agentRunId] = payload.split(":");
+    if (!sessionId || !agentRunId) return;
+    const abort = pendingCancellations.get(sessionId)?.get(agentRunId);
+    if (abort) {
+      console.log(
+        `[playground-runner] cancel-run signal received for ${sessionId.slice(0, 8)} agent ${agentRunId.slice(0, 8)}`,
+      );
+      abort();
+    }
   }
 });
 
@@ -71,9 +108,23 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
       throw new Error(`Unknown job name: ${job.name}`);
     }
 
-    const { sessionId, prompt, agentRuns, maxWallClockSeconds } = job.data;
+    const {
+      sessionId,
+      prompt,
+      agentRuns,
+      maxWallClockSeconds,
+      tools,
+      seedPromptText,
+      sandboxImage,
+      runTwiceAndAverage,
+    } = job.data;
 
     await job.updateProgress(createPlaygroundProgress("preparing-sandbox", "Creating shared sandbox + git worktrees"));
+
+    if (runTwiceAndAverage) {
+      // Wired through but not yet doubling the run set — PR-2 adds the averaging path.
+      console.log(`[playground-runner] session ${sessionId.slice(0, 8)} requested runTwiceAndAverage; persisted on the session but not yet doubled.`);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), (maxWallClockSeconds ?? MAX_WALL_CLOCK_SECONDS) * 1000);
@@ -89,6 +140,11 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
         maxReviewSeconds: MAX_REVIEW_SECONDS,
         signal: controller.signal,
         waitForRelease,
+        registerAgentSignal: (agentRunId, abort) =>
+          registerAgentSignal(sessionId, agentRunId, abort),
+        ...(tools ? { tools } : {}),
+        ...(seedPromptText ? { seedPromptText } : {}),
+        ...(sandboxImage ? { sandboxImage } : {}),
       });
 
       return {
@@ -98,6 +154,7 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
       };
     } finally {
       clearTimeout(timeout);
+      pendingCancellations.delete(sessionId);
     }
   },
   {

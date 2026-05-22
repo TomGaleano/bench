@@ -11,9 +11,26 @@ export const PLAYGROUND_RUN_JOB_NAME = "playground.run-session";
  */
 export const PLAYGROUND_RELEASE_CHANNEL = "pilab.playground.release";
 
+/**
+ * Redis pub/sub channel used to cancel a specific agent run mid-flight.
+ * Payload format: `${sessionId}:${agentRunId}`. Worker aborts the matching
+ * agent's controller; the run is marked failed with cancellation_reason set.
+ */
+export const PLAYGROUND_CANCEL_RUN_CHANNEL = "pilab.playground.cancel-run";
+
 export async function publishPlaygroundRelease(connection: Redis, sessionId: string): Promise<void> {
   await connection.publish(PLAYGROUND_RELEASE_CHANNEL, sessionId);
 }
+
+export async function publishPlaygroundCancelRun(
+  connection: Redis,
+  sessionId: string,
+  agentRunId: string,
+): Promise<void> {
+  await connection.publish(PLAYGROUND_CANCEL_RUN_CHANNEL, `${sessionId}:${agentRunId}`);
+}
+
+export type PlaygroundSandboxImage = "py" | "node" | "py-node" | "custom";
 
 export interface PlaygroundSessionJobData {
   sessionId: string;
@@ -24,6 +41,11 @@ export interface PlaygroundSessionJobData {
     modelName: string;
   }>;
   maxWallClockSeconds: number;
+  maxOutputTokensPerAgent?: number;
+  tools?: string[];
+  sandboxImage?: PlaygroundSandboxImage;
+  seedPromptText?: string;
+  runTwiceAndAverage?: boolean;
 }
 
 export interface PlaygroundSessionJobResult {

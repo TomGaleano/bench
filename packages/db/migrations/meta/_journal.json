@@ -64,6 +64,13 @@
       "when": 1779600000000,
       "tag": "0008_playground_session_saved",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1779700000000,
+      "tag": "0009_playground_advanced_options",
+      "breakpoints": true
     }
   ]
 }

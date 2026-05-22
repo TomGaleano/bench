@@ -9,7 +9,9 @@ import {
   createPlaygroundQueue,
   createRedisConnection,
   enqueuePlaygroundSessionJob,
+  publishPlaygroundCancelRun,
   publishPlaygroundRelease,
+  type PlaygroundSandboxImage,
 } from "@pilab/jobs";
 import type { FastifyPluginAsync } from "fastify";
 import type { RunEventBus } from "../event-bus.js";
@@ -22,7 +24,49 @@ type StartPlaygroundRequest = {
   prompt: string;
   models: Array<{ id: string; name: string }>;
   graderModelId?: string;
+  maxWallClockSeconds?: number;
+  maxOutputTokensPerAgent?: number;
+  tools?: string[];
+  sandboxImage?: PlaygroundSandboxImage;
+  seedPromptText?: string;
+  runTwiceAndAverage?: boolean;
 };
+
+const DEFAULT_MAX_WALL_CLOCK_SECONDS = 600;
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
+const MIN_WALL_CLOCK_SECONDS = 60;
+const MAX_WALL_CLOCK_SECONDS = 1800;
+const MIN_OUTPUT_TOKENS = 4_000;
+const MAX_OUTPUT_TOKENS = 128_000;
+const VALID_SANDBOX_IMAGES: PlaygroundSandboxImage[] = ["py", "node", "py-node"];
+const VALID_TOOLS = new Set([
+  "read",
+  "write",
+  "edit",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "network",
+]);
+
+function clampInt(value: number | undefined, min: number, max: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
+function sanitizeTools(tools: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const cleaned = tools.filter((t): t is string => typeof t === "string" && VALID_TOOLS.has(t));
+  return cleaned.length > 0 ? Array.from(new Set(cleaned)) : undefined;
+}
+
+function sanitizeSandboxImage(
+  image: PlaygroundSandboxImage | undefined,
+): PlaygroundSandboxImage | undefined {
+  if (!image) return undefined;
+  return VALID_SANDBOX_IMAGES.includes(image) ? image : undefined;
+}
 
 type PlaygroundSessionResponse = {
   id: string;
@@ -106,7 +150,7 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
           type: "object",
           required: ["prompt", "models"],
           properties: {
-            prompt: { type: "string", minLength: 1 },
+            prompt: { type: "string", minLength: 1, maxLength: 4000 },
             models: {
               type: "array",
               minItems: 2,
@@ -121,12 +165,47 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
               },
             },
             graderModelId: { type: "string" },
+            maxWallClockSeconds: { type: "integer" },
+            maxOutputTokensPerAgent: { type: "integer" },
+            tools: { type: "array", items: { type: "string" } },
+            sandboxImage: { type: "string" },
+            seedPromptText: { type: "string", maxLength: 8000 },
+            runTwiceAndAverage: { type: "boolean" },
           },
         },
       },
     },
     async (request, reply) => {
-      const { prompt, models, graderModelId } = request.body;
+      const {
+        prompt,
+        models,
+        graderModelId,
+        maxWallClockSeconds,
+        maxOutputTokensPerAgent,
+        tools,
+        sandboxImage,
+        seedPromptText,
+        runTwiceAndAverage,
+      } = request.body;
+
+      const wallClock = clampInt(
+        maxWallClockSeconds,
+        MIN_WALL_CLOCK_SECONDS,
+        MAX_WALL_CLOCK_SECONDS,
+        DEFAULT_MAX_WALL_CLOCK_SECONDS,
+      );
+      const outputCap = clampInt(
+        maxOutputTokensPerAgent,
+        MIN_OUTPUT_TOKENS,
+        MAX_OUTPUT_TOKENS,
+        DEFAULT_MAX_OUTPUT_TOKENS,
+      );
+      const cleanedTools = sanitizeTools(tools);
+      const cleanedImage = sanitizeSandboxImage(sandboxImage);
+      const cleanedSeed = typeof seedPromptText === "string" && seedPromptText.trim().length > 0
+        ? seedPromptText
+        : null;
+      const doubleRun = runTwiceAndAverage === true;
 
       const [session] = await fastify.db
         .insert(playgroundSessions)
@@ -135,6 +214,12 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
           status: "running",
           gradingMode: graderModelId ? "auto" : null,
           graderModelId: graderModelId ?? null,
+          maxWallClockSeconds: wallClock,
+          maxOutputTokensPerAgent: outputCap,
+          tools: cleanedTools ?? null,
+          sandboxImage: cleanedImage ?? null,
+          seedPromptText: cleanedSeed,
+          runTwiceAndAverage: doubleRun,
         })
         .returning();
 
@@ -176,7 +261,12 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
         sessionId: session.id,
         prompt,
         agentRuns: insertedRuns,
-        maxWallClockSeconds: 600,
+        maxWallClockSeconds: wallClock,
+        maxOutputTokensPerAgent: outputCap,
+        ...(cleanedTools ? { tools: cleanedTools } : {}),
+        ...(cleanedImage ? { sandboxImage: cleanedImage } : {}),
+        ...(cleanedSeed ? { seedPromptText: cleanedSeed } : {}),
+        ...(doubleRun ? { runTwiceAndAverage: true } : {}),
       });
 
       const response = await buildSessionResponse(fastify, session.id);
@@ -407,6 +497,31 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
       await publishPlaygroundRelease(connection, request.params.id);
       reply.code(200);
       return { released: true };
+    },
+  );
+
+  // POST /playground/:id/runs/:runId/stop — best-effort cancel an in-flight agent
+  fastify.post<{ Params: { id: string; runId: string } }>(
+    "/playground/:id/runs/:runId/stop",
+    async (request, reply) => {
+      const { id: sessionId, runId } = request.params;
+
+      // Set the cancellation reason eagerly so the eventual /runs/:runId update
+      // from the worker (which writes status=failed + output=...) doesn't blow
+      // it away. The worker writes a separate column, so this stays put.
+      await fastify.db
+        .update(playgroundAgentRuns)
+        .set({ cancellationReason: "cancelled_by_user" })
+        .where(
+          and(
+            eq(playgroundAgentRuns.id, runId),
+            eq(playgroundAgentRuns.sessionId, sessionId),
+          ),
+        );
+
+      await publishPlaygroundCancelRun(connection, sessionId, runId);
+      reply.code(202);
+      return { cancelling: true };
     },
   );
 

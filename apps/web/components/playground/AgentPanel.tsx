@@ -3,12 +3,13 @@
 import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { PlaygroundAgentRunResponse, PlaygroundEventResponse } from "../../lib/api";
-
-type AgentPanelProps = {
-  agentRun: PlaygroundAgentRunResponse;
-  events: PlaygroundEventResponse[];
-};
+import type {
+  PlaygroundAgentRunResponse,
+  PlaygroundEventResponse,
+} from "../../lib/api";
+import { pgVendor, pgVendorName } from "../../lib/playground-vendor";
+import { PreviewTile } from "./PreviewTile";
+import { AgentMoreMenu } from "./AgentMoreMenu";
 
 type TextItem = { kind: "text"; key: string; text: string };
 type ToolItem = {
@@ -20,63 +21,116 @@ type ToolItem = {
   result: unknown;
   isError: boolean;
   finished: boolean;
+  startedAt?: number;
+  finishedAt?: number;
+};
+type ToolGroupItem = {
+  kind: "tool-group";
+  key: string;
+  toolName: string;
+  scope: string | null;
+  children: ToolItem[];
 };
 type StatusItem = { kind: "status"; key: string; status: string };
 type ErrorItem = { kind: "error"; key: string; message: string };
-type TranscriptItem = TextItem | ToolItem | StatusItem | ErrorItem;
 
-const STATUS_COLORS: Record<string, string> = {
-  running: "var(--accent)",
-  succeeded: "#22c55e",
-  failed: "#ef4444",
-  preparing: "#f59e0b",
-  queued: "var(--ink-4)",
+type TranscriptItem =
+  | TextItem
+  | ToolItem
+  | ToolGroupItem
+  | StatusItem
+  | ErrorItem;
+
+type AgentPanelProps = {
+  agentRun: PlaygroundAgentRunResponse;
+  events: PlaygroundEventResponse[];
+  index: number;
+  showPreview?: boolean;
+  onStop?: () => void;
+  compact?: boolean;
 };
 
-export function AgentPanel({ agentRun, events }: AgentPanelProps) {
-  const transcript = useMemo(() => buildTranscript(events), [events]);
+export function AgentPanel({
+  agentRun,
+  events,
+  index,
+  showPreview = false,
+  onStop,
+  compact = false,
+}: AgentPanelProps) {
+  const transcript = useMemo(() => groupTranscript(buildTranscript(events)), [events]);
   const isLive = agentRun.status === "running" || agentRun.status === "preparing";
   const lastItem = transcript[transcript.length - 1];
   const showCursor = isLive && lastItem?.kind === "text";
 
+  const port = derivePortFromAppUrl(agentRun.appUrl) ?? 30000 + index;
+  const vendorSlug = pgVendorName(agentRun.modelId);
+  const statusText = describeStatus(agentRun.status);
+
   return (
-    <div className="card2" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div className="card2-hd">
-        <span className="card2-ti">
-          {agentRun.modelName}
-          <span
-            style={{
-              display: "inline-block",
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: STATUS_COLORS[agentRun.status] ?? "var(--ink-4)",
-              marginLeft: 8,
-            }}
+    <div className="pg-agent">
+      <div className="pg-agent-hd">
+        <div className="left">
+          <span className={"pg-status-dot " + agentRun.status} />
+          <div>
+            <div className="nm">{agentRun.modelName}</div>
+            {!compact && (
+              <div className="vendor">
+                {vendorSlug} · port {port}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="left" style={{ justifyContent: "center" }}>
+          <span className="status-text">{statusText}</span>
+        </div>
+        <div className="right">
+          {agentRun.appUrl && (
+            <a
+              className="pg-open-chip"
+              href={agentRun.appUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <svg
+                viewBox="0 0 12 12"
+                width="10"
+                height="10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                aria-hidden="true"
+              >
+                <path d="M5 2H2v8h8V7M7 2h3v3M5 7l5-5" />
+              </svg>
+              <span>open app</span>
+            </a>
+          )}
+          <AgentMoreMenu
+            canStop={isLive}
+            {...(onStop ? { onStop } : {})}
+            onCopyTranscript={() => copyTranscript(transcript)}
           />
-        </span>
-        <span style={{ color: "var(--ink-4)", fontFamily: "var(--mono)", fontSize: 11 }}>
-          {agentRun.status}
-        </span>
+        </div>
       </div>
 
-      {agentRun.appUrl && (
-        <div style={{ padding: "0 16px 8px" }}>
-          <a
-            href={agentRun.appUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn2"
-            style={{ fontSize: 12 }}
-          >
-            Open app ↗
-          </a>
+      {showPreview && agentRun.appUrl && (
+        <div style={{ padding: "12px 14px 0" }}>
+          <PreviewTile url={agentRun.appUrl} />
         </div>
       )}
 
-      <div className="playground-transcript" style={{ flex: 1, overflow: "auto", padding: "8px 16px" }}>
+      <div className="pg-tx">
         {transcript.length === 0 ? (
-          <p style={{ color: "var(--ink-4)", fontStyle: "italic", fontSize: 13 }}>
+          <p
+            style={{
+              color: "var(--ink-4)",
+              fontStyle: "italic",
+              fontSize: 13,
+              fontFamily: "var(--serif)",
+              margin: 0,
+            }}
+          >
             {agentRun.status === "queued"
               ? "Waiting to start…"
               : agentRun.status === "preparing"
@@ -84,231 +138,225 @@ export function AgentPanel({ agentRun, events }: AgentPanelProps) {
                 : "No events yet"}
           </p>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {transcript.map((item, idx) => {
-              const isLastTextItem = idx === transcript.length - 1 && item.kind === "text" && showCursor;
-              return renderItem(item, isLastTextItem);
-            })}
-          </div>
+          transcript.map((item, idx) => {
+            const isLastTextItem =
+              idx === transcript.length - 1 && item.kind === "text" && showCursor;
+            return renderItem(item, isLastTextItem);
+          })
         )}
       </div>
     </div>
   );
 }
 
+function describeStatus(status: PlaygroundAgentRunResponse["status"]): string {
+  switch (status) {
+    case "queued":
+      return "queued";
+    case "preparing":
+      return "preparing";
+    case "running":
+      return "running";
+    case "succeeded":
+      return "done";
+    case "failed":
+      return "failed";
+    default:
+      return status;
+  }
+}
+
+function derivePortFromAppUrl(url: string | null): number | null {
+  if (!url) return null;
+  const match = url.match(/-(\d{4,5})\./);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isInteger(n) ? n : null;
+}
+
 function renderItem(item: TranscriptItem, withCursor: boolean) {
   if (item.kind === "text") {
     return (
-      <div key={item.key} className="playground-md" style={{ color: "var(--ink-1)" }}>
+      <div key={item.key} className="pg-tx-text">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
             a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-            pre: (props) => (
-              <pre
-                {...props}
-                style={{
-                  background: "var(--surface-2, rgba(0,0,0,0.04))",
-                  padding: 8,
-                  borderRadius: 6,
-                  overflow: "auto",
-                  fontSize: 12,
-                }}
-              />
-            ),
-            code: (props) => {
-              const { children, className, ...rest } = props as {
-                children?: React.ReactNode;
-                className?: string;
-              };
-              const isBlock = className?.includes("language-");
-              if (isBlock) {
-                return (
-                  <code {...rest} className={className}>
-                    {children}
-                  </code>
-                );
-              }
-              return (
-                <code
-                  {...rest}
-                  style={{
-                    background: "var(--surface-2, rgba(0,0,0,0.06))",
-                    padding: "1px 5px",
-                    borderRadius: 4,
-                    fontSize: "0.92em",
-                    fontFamily: "var(--mono)",
-                  }}
-                >
-                  {children}
-                </code>
-              );
-            },
           }}
         >
           {item.text}
         </ReactMarkdown>
-        {withCursor && <BlinkingCursor />}
+        {withCursor && <span className="caret" />}
       </div>
     );
   }
   if (item.kind === "tool") {
     return (
-      <details
+      <div
         key={item.key}
-        className="playground-tool"
-        style={{
-          alignSelf: "flex-start",
-          maxWidth: "100%",
-        }}
+        className={
+          "pg-tx-tool" +
+          (item.finished ? " done" : "") +
+          (item.isError ? " error" : "")
+        }
       >
+        <span className="glyph" />
+        <span>
+          {item.toolName}
+          {summarizeArgs(item) && (
+            <>
+              {" "}
+              <span className="arg">{summarizeArgs(item)}</span>
+            </>
+          )}
+        </span>
+        <span className="ms">
+          {item.finished
+            ? formatDuration(item.startedAt, item.finishedAt)
+            : "running…"}
+        </span>
+      </div>
+    );
+  }
+  if (item.kind === "tool-group") {
+    const totalChildren = item.children.length;
+    const failed = item.children.some((c) => c.isError);
+    return (
+      <details key={item.key} className="pg-tx-tool group done" style={{ display: "block" }}>
         <summary
           style={{
-            cursor: "pointer",
-            display: "inline-flex",
+            display: "grid",
+            gridTemplateColumns: "14px 1fr auto",
+            gap: 10,
             alignItems: "center",
-            gap: 6,
-            padding: "3px 10px 3px 6px",
-            borderRadius: 999,
-            background: "var(--surface-2, rgba(0,0,0,0.05))",
-            color: item.isError ? "#ef4444" : "var(--ink-2)",
-            fontFamily: "var(--mono)",
-            fontSize: 12,
+            cursor: "pointer",
             listStyle: "none",
-            userSelect: "none",
           }}
         >
-          <span style={{ opacity: 0.55, fontSize: 10 }}>▸</span>
-          <ToolGlyph isError={item.isError} finished={item.finished} />
-          <span style={{ fontWeight: 600 }}>{item.toolName}</span>
-          {!item.finished && (
-            <span style={{ color: "var(--ink-4)", fontSize: 10 }}>running…</span>
-          )}
+          <span className="glyph" style={failed ? { background: "var(--err)" } : undefined} />
+          <span>
+            {item.toolName}{" "}
+            <span className="arg">
+              {item.scope ? `${item.scope} · ` : ""}
+              {totalChildren}× calls
+            </span>
+            <span className="badge">grouped</span>
+          </span>
+          <span className="ms">{totalChildren}</span>
         </summary>
-        <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
-          {item.arguments !== undefined && <Block label="arguments" value={item.arguments} />}
-          {item.finished && item.result !== undefined && <Block label="result" value={item.result} />}
+        <div
+          style={{
+            marginTop: 6,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+            paddingLeft: 24,
+          }}
+        >
+          {item.children.map((child) => (
+            <div
+              key={child.key}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto",
+                gap: 10,
+                fontFamily: "var(--mono)",
+                fontSize: 11,
+                color: "var(--ink-3)",
+              }}
+            >
+              <span>
+                <span style={{ color: "var(--accent)" }}>$</span>{" "}
+                {summarizeArgs(child) || child.toolName}
+              </span>
+              <span
+                style={{
+                  color: child.isError ? "var(--err)" : "var(--ink-4)",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {child.finished
+                  ? formatDuration(child.startedAt, child.finishedAt)
+                  : "running…"}
+              </span>
+            </div>
+          ))}
         </div>
       </details>
     );
   }
   if (item.kind === "status") {
     return (
-      <div
-        key={item.key}
-        style={{
-          alignSelf: "flex-start",
-          color: "var(--ink-4)",
-          fontFamily: "var(--mono)",
-          fontSize: 10,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-          opacity: 0.7,
-        }}
-      >
-        · {item.status}
+      <div key={item.key} className="pg-tx-status">
+        {item.status}
       </div>
     );
   }
   return (
-    <div
-      key={item.key}
-      style={{
-        color: "#ef4444",
-        background: "rgba(239, 68, 68, 0.08)",
-        padding: "4px 8px",
-        borderRadius: 4,
-        fontFamily: "var(--mono)",
-        fontSize: 12,
-        whiteSpace: "pre-wrap",
-      }}
-    >
-      Error: {item.message}
+    <div key={item.key} className="pg-tx-err">
+      {item.message}
     </div>
   );
 }
 
-function ToolGlyph({ isError, finished }: { isError: boolean; finished: boolean }) {
-  const color = isError ? "#ef4444" : finished ? "var(--accent)" : "var(--ink-4)";
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        width: 12,
-        height: 12,
-        borderRadius: 3,
-        background: color,
-        opacity: 0.85,
-        flex: "none",
-      }}
-      aria-hidden="true"
-    />
-  );
-}
-
-function Block({ label, value }: { label: string; value: unknown }) {
-  const text = formatValue(value);
-  return (
-    <div>
-      <div style={{ color: "var(--ink-4)", fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>
-        {label}
-      </div>
-      <pre
-        style={{
-          margin: 0,
-          marginTop: 2,
-          whiteSpace: "pre-wrap",
-          fontSize: 11,
-          color: "var(--ink-2)",
-          maxHeight: 220,
-          overflow: "auto",
-          background: "var(--surface-2, rgba(0,0,0,0.04))",
-          padding: 6,
-          borderRadius: 4,
-        }}
-      >
-        {text}
-      </pre>
-    </div>
-  );
-}
-
-function formatValue(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") {
-    if (value.length > 0 && (value.trim().startsWith("{") || value.trim().startsWith("["))) {
-      try {
-        return JSON.stringify(JSON.parse(value), null, 2);
-      } catch {
-        return value;
-      }
+function summarizeArgs(item: ToolItem): string {
+  const args = item.arguments;
+  if (args == null) return "";
+  if (typeof args === "string") {
+    return truncate(args, 72);
+  }
+  if (typeof args === "object") {
+    const a = args as Record<string, unknown>;
+    const path = stringOrUndef(a.path) ?? stringOrUndef(a.filename) ?? stringOrUndef(a.file);
+    const cmd = stringOrUndef(a.command) ?? stringOrUndef(a.cmd);
+    const pattern = stringOrUndef(a.pattern) ?? stringOrUndef(a.regex);
+    if (cmd) return truncate(cmd, 72);
+    if (path) return truncate(path, 72);
+    if (pattern) return truncate(pattern, 72);
+    try {
+      return truncate(JSON.stringify(args), 72);
+    } catch {
+      return "";
     }
-    return value;
   }
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
+  return "";
 }
 
-function BlinkingCursor() {
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        width: 8,
-        height: "1em",
-        marginLeft: 2,
-        background: "var(--accent)",
-        animation: "playgroundCursorBlink 1s steps(2, start) infinite",
-        verticalAlign: "text-bottom",
-      }}
-    >
-      <style>{`@keyframes playgroundCursorBlink { to { visibility: hidden; } }`}</style>
-    </span>
-  );
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
 }
+
+function stringOrUndef(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function formatDuration(start: number | undefined, end: number | undefined): string {
+  if (start == null || end == null || end < start) return "—";
+  const ms = end - start;
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function copyTranscript(items: TranscriptItem[]) {
+  const text = items
+    .map((item) => {
+      if (item.kind === "text") return item.text;
+      if (item.kind === "tool") return `$ ${item.toolName} ${summarizeArgs(item)}`;
+      if (item.kind === "tool-group")
+        return item.children
+          .map((c) => `$ ${c.toolName} ${summarizeArgs(c)}`)
+          .join("\n");
+      if (item.kind === "status") return `· ${item.status}`;
+      if (item.kind === "error") return `[error] ${item.message}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  void navigator.clipboard?.writeText(text);
+}
+
+// ── Transcript builder ────────────────────────────────────────────────────
 
 function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
   const items: TranscriptItem[] = [];
@@ -322,6 +370,7 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
 
   for (const ev of events) {
     const payload = (ev.payload ?? {}) as Record<string, unknown>;
+    const eventTime = parseTimestamp(ev);
 
     if (ev.kind === "assistant_text_delta") {
       const delta = typeof payload.delta === "string" ? payload.delta : "";
@@ -331,8 +380,6 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
     }
 
     if (ev.kind === "tool_call_started") {
-      // Skip the "unknown" tool calls historical sessions persisted from
-      // message_update.toolcall_start (those don't carry a real name).
       const rawToolName = payload.toolName;
       if (rawToolName === undefined || rawToolName === "unknown") continue;
       flushText();
@@ -346,6 +393,7 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
         result: undefined,
         isError: false,
         finished: false,
+        ...(eventTime !== undefined ? { startedAt: eventTime } : {}),
       };
       toolIndex.set(toolCallId, items.length);
       items.push(item);
@@ -372,6 +420,7 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
         existing.result = payload.result;
         existing.isError = Boolean(payload.isError);
         existing.finished = true;
+        if (eventTime !== undefined) existing.finishedAt = eventTime;
       } else {
         flushText();
         items.push({
@@ -383,6 +432,7 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
           result: payload.result,
           isError: Boolean(payload.isError),
           finished: true,
+          ...(eventTime !== undefined ? { finishedAt: eventTime } : {}),
         });
       }
       continue;
@@ -390,7 +440,6 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
 
     if (ev.kind === "status") {
       const status = String(payload.status ?? "");
-      // Drop Pi-SDK lifecycle noise persisted by older worker versions.
       if (
         status === "agent_start" ||
         status === "agent_end" ||
@@ -436,4 +485,72 @@ function buildTranscript(events: PlaygroundEventResponse[]): TranscriptItem[] {
 
   flushText();
   return items;
+}
+
+function parseTimestamp(ev: PlaygroundEventResponse): number | undefined {
+  if (ev.timestamp) {
+    const d = new Date(ev.timestamp).getTime();
+    if (Number.isFinite(d)) return d;
+  }
+  return undefined;
+}
+
+// ── Tool-call grouping ────────────────────────────────────────────────────
+//
+// Collapse ≥2 consecutive tool calls that either:
+// - share the same `toolName` (e.g. a bash chain), OR
+// - mutate the same target file path (multiple write/edit of the same file).
+// The grouping renders as one `pg-tx-tool group` with a <details> revealing each.
+
+function toolScope(item: ToolItem): string | null {
+  const args = item.arguments;
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const a = args as Record<string, unknown>;
+    return (
+      stringOrUndef(a.path) ??
+      stringOrUndef(a.filename) ??
+      stringOrUndef(a.file) ??
+      null
+    );
+  }
+  return null;
+}
+
+function groupTranscript(items: TranscriptItem[]): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  let i = 0;
+  while (i < items.length) {
+    const cur = items[i];
+    if (!cur || cur.kind !== "tool") {
+      if (cur) out.push(cur);
+      i++;
+      continue;
+    }
+    // Look ahead for a consecutive group.
+    let j = i + 1;
+    const scope = toolScope(cur);
+    while (j < items.length) {
+      const next = items[j];
+      if (!next || next.kind !== "tool") break;
+      const sameName = next.toolName === cur.toolName;
+      const sameScope = scope != null && toolScope(next) === scope;
+      if (!sameName && !sameScope) break;
+      j++;
+    }
+    const runLength = j - i;
+    if (runLength >= 2) {
+      const children = items.slice(i, j).filter((it): it is ToolItem => it.kind === "tool");
+      out.push({
+        kind: "tool-group",
+        key: `group-${cur.key}`,
+        toolName: cur.toolName,
+        scope: scope,
+        children,
+      });
+    } else {
+      out.push(cur);
+    }
+    i = j;
+  }
+  return out;
 }

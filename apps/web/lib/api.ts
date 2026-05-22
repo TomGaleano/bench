@@ -458,6 +458,12 @@ export type PlaygroundStartRequest = {
   prompt: string;
   models: Array<{ id: string; name: string }>;
   graderModelId?: string | undefined;
+  maxWallClockSeconds?: number;
+  maxOutputTokensPerAgent?: number;
+  tools?: string[];
+  sandboxImage?: "py" | "node" | "py-node" | "custom";
+  seedPromptText?: string;
+  runTwiceAndAverage?: boolean;
 };
 
 export type PlaygroundAgentRunResponse = {
@@ -615,6 +621,18 @@ export async function releasePlaygroundSandbox(sessionId: string) {
     throw new Error(message || `API request failed with ${response.status}`);
   }
   return response.json() as Promise<{ released: boolean }>;
+}
+
+export async function stopPlaygroundAgentRun(sessionId: string, agentRunId: string) {
+  const response = await fetch(
+    `${getApiBaseUrl()}/playground/${sessionId}/runs/${agentRunId}/stop`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ cancelling: boolean }>;
 }
 
 export async function listSavedPlaygroundSessions() {
