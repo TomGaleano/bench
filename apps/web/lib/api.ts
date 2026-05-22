@@ -476,9 +476,37 @@ export type PlaygroundAgentRunResponse = {
   output: string | null;
   score: number | null;
   scoreRationale: string | null;
+  scoreCorrectness: number | null;
+  scoreCodeQuality: number | null;
+  scoreUx: number | null;
+  scoreShipIt: number | null;
+  fileCount: number | null;
+  loc: number | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+};
+
+export type PlaygroundAutograderScoreRow = {
+  agentRunId: string;
+  overall: number | null;
+  correctness: number | null;
+  codeQuality: number | null;
+  ux: number | null;
+  shipIt: number | null;
+  rationale: string | null;
+};
+
+export type PlaygroundAutograderRunResponse = {
+  id: string;
+  graderModelId: string;
+  status: string;
+  latencyMs: number | null;
+  usdCost: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  scores: PlaygroundAutograderScoreRow[];
 };
 
 export type PlaygroundSessionResponse = {
@@ -644,7 +672,29 @@ export async function listSavedPlaygroundSessions() {
   return response.json() as Promise<PlaygroundSessionResponse[]>;
 }
 
-export async function scorePlayground(sessionId: string, scores: Array<{ agentRunId: string; score: number; rationale?: string | undefined }>) {
+export type PlaygroundScoreInput = {
+  agentRunId: string;
+  score: number;
+  rationale?: string | undefined;
+  correctness?: number | null | undefined;
+  codeQuality?: number | null | undefined;
+  ux?: number | null | undefined;
+  shipIt?: number | null | undefined;
+};
+
+export async function getPlaygroundAutograders(sessionId: string) {
+  const response = await fetch(
+    `${getApiBaseUrl()}/playground/${sessionId}/autograders`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundAutograderRunResponse[]>;
+}
+
+export async function scorePlayground(sessionId: string, scores: PlaygroundScoreInput[]) {
   const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/score`, {
     body: JSON.stringify({ scores }),
     headers: { "Content-Type": "application/json" },
@@ -659,10 +709,11 @@ export async function scorePlayground(sessionId: string, scores: Array<{ agentRu
   return response.json() as Promise<{ accepted: boolean }>;
 }
 
-export async function autoGradePlayground(sessionId: string) {
+export async function autoGradePlayground(sessionId: string, graders?: string[]) {
   const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/grade-auto`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(graders && graders.length > 0 ? { graders } : {}),
   });
 
   if (!response.ok) {
@@ -670,7 +721,7 @@ export async function autoGradePlayground(sessionId: string) {
     throw new Error(message || `API request failed with ${response.status}`);
   }
 
-  return response.json() as Promise<{ accepted: boolean }>;
+  return response.json() as Promise<{ accepted: boolean; autograderRunIds: string[] }>;
 }
 
 export async function listModels() {

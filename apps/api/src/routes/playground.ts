@@ -4,6 +4,8 @@ import {
   playgroundSessions,
   playgroundAgentRuns,
   playgroundEvents,
+  playgroundAutograderRuns,
+  playgroundAutograderScores,
 } from "@pilab/db/schema";
 import {
   createPlaygroundQueue,
@@ -87,6 +89,12 @@ type PlaygroundSessionResponse = {
     output: string | null;
     score: number | null;
     scoreRationale: string | null;
+    scoreCorrectness: number | null;
+    scoreCodeQuality: number | null;
+    scoreUx: number | null;
+    scoreShipIt: number | null;
+    fileCount: number | null;
+    loc: number | null;
     createdAt: string;
     startedAt: string | null;
     finishedAt: string | null;
@@ -124,6 +132,8 @@ type UpdateRunRequest = {
   output?: string;
   startedAt?: string;
   finishedAt?: string;
+  fileCount?: number;
+  loc?: number;
 };
 
 export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = async (
@@ -452,6 +462,8 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
             output: { type: "string" },
             startedAt: { type: "string" },
             finishedAt: { type: "string" },
+            fileCount: { type: "integer", minimum: 0 },
+            loc: { type: "integer", minimum: 0 },
           },
         },
       },
@@ -467,6 +479,8 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
       if (body.output !== undefined) update.output = body.output;
       if (body.startedAt !== undefined) update.startedAt = new Date(body.startedAt);
       if (body.finishedAt !== undefined) update.finishedAt = new Date(body.finishedAt);
+      if (body.fileCount !== undefined) update.fileCount = body.fileCount;
+      if (body.loc !== undefined) update.loc = body.loc;
 
       if (Object.keys(update).length > 0) {
         await fastify.db
@@ -554,9 +568,45 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
   // POST /playground/:id/score — submit scores
   fastify.post<{
     Params: { id: string };
-    Body: { scores: Array<{ agentRunId: string; score: number; rationale?: string }> };
+    Body: {
+      scores: Array<{
+        agentRunId: string;
+        score: number;
+        rationale?: string;
+        correctness?: number | null;
+        codeQuality?: number | null;
+        ux?: number | null;
+        shipIt?: number | null;
+      }>;
+    };
   }>(
     "/playground/:id/score",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["scores"],
+          properties: {
+            scores: {
+              type: "array",
+              items: {
+                type: "object",
+                required: ["agentRunId", "score"],
+                properties: {
+                  agentRunId: { type: "string" },
+                  score: { type: "integer", minimum: 0, maximum: 100 },
+                  rationale: { type: "string" },
+                  correctness: { type: ["integer", "null"], minimum: 0, maximum: 5 },
+                  codeQuality: { type: ["integer", "null"], minimum: 0, maximum: 5 },
+                  ux: { type: ["integer", "null"], minimum: 0, maximum: 5 },
+                  shipIt: { type: ["integer", "null"], minimum: 0, maximum: 5 },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     async (request, reply) => {
       const { scores } = request.body;
 
@@ -566,6 +616,10 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
           .set({
             score: s.score,
             scoreRationale: s.rationale ?? null,
+            scoreCorrectness: s.correctness ?? null,
+            scoreCodeQuality: s.codeQuality ?? null,
+            scoreUx: s.ux ?? null,
+            scoreShipIt: s.shipIt ?? null,
             scoredAt: new Date(),
           })
           .where(eq(playgroundAgentRuns.id, s.agentRunId));
@@ -592,14 +646,28 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
     },
   );
 
-  // POST /playground/:id/grade-auto — trigger auto-grading (body optional)
-  fastify.post<{ Params: { id: string } }>(
+  // POST /playground/:id/grade-auto — trigger auto-grading with one or more graders
+  fastify.post<{
+    Params: { id: string };
+    Body: { graders?: string[] } | null;
+  }>(
     "/playground/:id/grade-auto",
     {
       schema: {
         body: {
           oneOf: [
-            { type: "object", additionalProperties: true },
+            {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                graders: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 3,
+                  items: { type: "string" },
+                },
+              },
+            },
             { type: "null" },
           ],
         },
@@ -617,7 +685,11 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
         throw new Error(`Playground session not found: ${request.params.id}`);
       }
 
-      const graderModelId = session.graderModelId ?? "openai/gpt-4o";
+      const requested = request.body?.graders;
+      const graderIds: string[] =
+        requested && requested.length > 0
+          ? Array.from(new Set(requested))
+          : [session.graderModelId ?? "openai/gpt-4o"];
 
       const runs = await fastify.db
         .select()
@@ -630,41 +702,150 @@ export const playgroundRoutes: FastifyPluginAsync<PlaygroundRoutesOptions> = asy
         throw new Error("OPENROUTER_API_KEY not configured");
       }
 
-      for (const run of runs) {
-        if (!run.output) continue;
+      const enqueuedRunIds: string[] = [];
 
+      // Each grader becomes a playground_autograder_runs row; we do the work
+      // synchronously inside the request since calls are short and there's
+      // no concurrency issue (a session has at most ~5 agents × ~3 graders).
+      for (const graderId of graderIds) {
+        const [autoRow] = await fastify.db
+          .insert(playgroundAutograderRuns)
+          .values({
+            sessionId: session.id,
+            graderModelId: graderId,
+            status: "running",
+          })
+          .returning();
+
+        if (!autoRow) continue;
+        enqueuedRunIds.push(autoRow.id);
+
+        const startedAt = Date.now();
         try {
-          const result = await gradePlaygroundOutput({
-            prompt: session.prompt,
-            modelName: run.modelName,
-            output: run.output,
-            apiKey,
-            modelId: graderModelId,
-          });
+          for (const run of runs) {
+            if (!run.output) continue;
+
+            const result = await gradePlaygroundOutput({
+              prompt: session.prompt,
+              modelName: run.modelName,
+              output: run.output,
+              apiKey,
+              modelId: graderId,
+            });
+
+            await fastify.db
+              .insert(playgroundAutograderScores)
+              .values({
+                autograderRunId: autoRow.id,
+                agentRunId: run.id,
+                overall: result.score,
+                correctness: result.correctness ?? null,
+                codeQuality: result.codeQuality ?? null,
+                ux: result.ux ?? null,
+                shipIt: result.shipIt ?? null,
+                rationale: result.reasoning,
+              });
+
+            // Mirror onto the agent run when this is the first / only grader
+            // so the existing "score" column stays meaningful for non-multi-grader users.
+            if (graderIds.length === 1 && run.score === null) {
+              await fastify.db
+                .update(playgroundAgentRuns)
+                .set({
+                  score: result.score,
+                  scoreRationale: result.reasoning,
+                  scoreCorrectness: result.correctness ?? null,
+                  scoreCodeQuality: result.codeQuality ?? null,
+                  scoreUx: result.ux ?? null,
+                  scoreShipIt: result.shipIt ?? null,
+                  scoredAt: new Date(),
+                })
+                .where(eq(playgroundAgentRuns.id, run.id));
+            }
+          }
 
           await fastify.db
-            .update(playgroundAgentRuns)
+            .update(playgroundAutograderRuns)
             .set({
-              score: result.score,
-              scoreRationale: result.reasoning,
-              scoredAt: new Date(),
+              status: "completed",
+              latencyMs: Date.now() - startedAt,
+              finishedAt: new Date(),
             })
-            .where(eq(playgroundAgentRuns.id, run.id));
+            .where(eq(playgroundAutograderRuns.id, autoRow.id));
         } catch (err) {
-          request.log.error({ err, agentRunId: run.id }, "Auto-grading failed");
+          request.log.error({ err, graderId }, "Auto-grading failed");
+          await fastify.db
+            .update(playgroundAutograderRuns)
+            .set({
+              status: "failed",
+              errorMessage: err instanceof Error ? err.message : String(err),
+              finishedAt: new Date(),
+              latencyMs: Date.now() - startedAt,
+            })
+            .where(eq(playgroundAutograderRuns.id, autoRow.id));
         }
       }
 
-      await fastify.db
-        .update(playgroundSessions)
-        .set({ status: "completed", completedAt: new Date() })
-        .where(eq(playgroundSessions.id, request.params.id));
+      if (graderIds.length === 1) {
+        await fastify.db
+          .update(playgroundSessions)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(eq(playgroundSessions.id, request.params.id));
+      }
 
       // Auto-grading implies the human is done with the live sandbox.
       await publishPlaygroundRelease(connection, request.params.id);
 
       reply.code(200);
-      return { accepted: true };
+      return { accepted: true, autograderRunIds: enqueuedRunIds };
+    },
+  );
+
+  // GET /playground/:id/autograders — list autograder runs + scores for a session
+  fastify.get<{ Params: { id: string } }>(
+    "/playground/:id/autograders",
+    async (request) => {
+      const sessionId = request.params.id;
+      const autograderRows = await fastify.db
+        .select()
+        .from(playgroundAutograderRuns)
+        .where(eq(playgroundAutograderRuns.sessionId, sessionId))
+        .orderBy(desc(playgroundAutograderRuns.createdAt));
+
+      if (autograderRows.length === 0) return [];
+
+      const runIds = autograderRows.map((r) => r.id);
+      const scoreRows = await fastify.db
+        .select()
+        .from(playgroundAutograderScores)
+        .where(inArray(playgroundAutograderScores.autograderRunId, runIds));
+
+      const byRun = new Map<string, typeof scoreRows>();
+      for (const s of scoreRows) {
+        const bucket = byRun.get(s.autograderRunId) ?? [];
+        bucket.push(s);
+        byRun.set(s.autograderRunId, bucket);
+      }
+
+      return autograderRows.map((r) => ({
+        id: r.id,
+        graderModelId: r.graderModelId,
+        status: r.status,
+        latencyMs: r.latencyMs,
+        usdCost: r.usdCost,
+        errorMessage: r.errorMessage,
+        createdAt: r.createdAt.toISOString(),
+        finishedAt: r.finishedAt?.toISOString() ?? null,
+        scores: (byRun.get(r.id) ?? []).map((s) => ({
+          agentRunId: s.agentRunId,
+          overall: s.overall,
+          correctness: s.correctness,
+          codeQuality: s.codeQuality,
+          ux: s.ux,
+          shipIt: s.shipIt,
+          rationale: s.rationale,
+        })),
+      }));
     },
   );
 
@@ -731,6 +912,12 @@ async function buildSessionResponse(
       output: r.output,
       score: r.score,
       scoreRationale: r.scoreRationale,
+      scoreCorrectness: r.scoreCorrectness,
+      scoreCodeQuality: r.scoreCodeQuality,
+      scoreUx: r.scoreUx,
+      scoreShipIt: r.scoreShipIt,
+      fileCount: r.fileCount,
+      loc: r.loc,
       createdAt: r.createdAt.toISOString(),
       startedAt: r.startedAt?.toISOString() ?? null,
       finishedAt: r.finishedAt?.toISOString() ?? null,
@@ -770,7 +957,14 @@ async function gradePlaygroundOutput(input: {
   output: string;
   apiKey: string;
   modelId: string;
-}): Promise<{ score: number; reasoning: string }> {
+}): Promise<{
+  score: number;
+  reasoning: string;
+  correctness?: number;
+  codeQuality?: number;
+  ux?: number;
+  shipIt?: number;
+}> {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -782,14 +976,17 @@ async function gradePlaygroundOutput(input: {
       messages: [
         {
           role: "system",
-          content: `You are grading how well an AI agent completed a coding task.
-Score the agent's output on a scale of 0-100 based on:
-1. Correctness (most important): Does the output satisfy the task requirements?
-2. Quality: Is the code well-structured, complete, and functional?
-3. Completeness: Are all requested features implemented?
-4. Creativity: Is the solution elegant and well-designed?
+          content: `You are evaluating how well an AI coding agent completed a task.
+For the given task and agent output, rate four 1-5 axes:
 
-Be fair and consistent. Output JSON with: { "score": number, "reasoning": string }`,
+- correctness: does it satisfy the task requirements?
+- code_quality: is the code well-structured and idiomatic?
+- ux: is the resulting UX / interface polished where applicable?
+- ship_it: would you ship this as-is?
+
+Then compute an overall score (0-100) as a weighted blend (correctness 40 %, code_quality 25 %, ux 15 %, ship_it 20 %, mapped from 1-5 to 0-20 each).
+
+Be fair and consistent. Return JSON exactly: { "score": number, "correctness": int, "code_quality": int, "ux": int, "ship_it": int, "reasoning": string }`,
         },
         {
           role: "user",
@@ -805,9 +1002,13 @@ Be fair and consistent. Output JSON with: { "score": number, "reasoning": string
             type: "object",
             properties: {
               score: { type: "number" },
+              correctness: { type: "integer", minimum: 1, maximum: 5 },
+              code_quality: { type: "integer", minimum: 1, maximum: 5 },
+              ux: { type: "integer", minimum: 1, maximum: 5 },
+              ship_it: { type: "integer", minimum: 1, maximum: 5 },
               reasoning: { type: "string" },
             },
-            required: ["score", "reasoning"],
+            required: ["score", "correctness", "code_quality", "ux", "ship_it", "reasoning"],
             additionalProperties: false,
           },
         },
@@ -828,6 +1029,21 @@ Be fair and consistent. Output JSON with: { "score": number, "reasoning": string
   const content = data.choices?.[0]?.message?.content;
   if (!content) throw new Error("No content in grader response");
 
-  const parsed = JSON.parse(content) as { score: number; reasoning: string };
-  return { score: parsed.score, reasoning: parsed.reasoning };
+  const parsed = JSON.parse(content) as {
+    score: number;
+    correctness?: number;
+    code_quality?: number;
+    ux?: number;
+    ship_it?: number;
+    reasoning: string;
+  };
+  const result: ReturnType<typeof gradePlaygroundOutput> extends Promise<infer T> ? T : never = {
+    score: parsed.score,
+    reasoning: parsed.reasoning,
+  };
+  if (typeof parsed.correctness === "number") result.correctness = parsed.correctness;
+  if (typeof parsed.code_quality === "number") result.codeQuality = parsed.code_quality;
+  if (typeof parsed.ux === "number") result.ux = parsed.ux;
+  if (typeof parsed.ship_it === "number") result.shipIt = parsed.ship_it;
+  return result;
 }

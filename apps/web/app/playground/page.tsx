@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hero } from "../../components/ui/Hero";
 import { ComposeStep } from "../../components/playground/ComposeStep";
 import { LiveStep } from "../../components/playground/LiveStep";
-import { ScoringPanel } from "../../components/playground/ScoringPanel";
+import { ScoreStep } from "../../components/playground/ScoreStep";
 import {
   PLAYGROUND_ADVANCED_DEFAULTS,
   type PlaygroundAdvancedOptions,
@@ -18,13 +18,16 @@ import {
   openPlaygroundEventStream,
   scorePlayground,
   autoGradePlayground,
+  getPlaygroundAutograders,
   savePlaygroundSession,
   unsavePlaygroundSession,
   releasePlaygroundSandbox,
   stopPlaygroundAgentRun,
   type ModelInfo,
+  type PlaygroundAutograderRunResponse,
   type PlaygroundSessionResponse,
   type PlaygroundEventResponse,
+  type PlaygroundScoreInput,
 } from "../../lib/api";
 
 type Step = "compose" | "live" | "score";
@@ -40,6 +43,9 @@ export default function PlaygroundPage() {
 
   const [session, setSession] = useState<PlaygroundSessionResponse | null>(null);
   const [sessionEvents, setSessionEvents] = useState<PlaygroundEventResponse[]>([]);
+  const [autograders, setAutograders] = useState<PlaygroundAutograderRunResponse[]>([]);
+  const [blindScoring, setBlindScoring] = useState(false);
+  const [isGrading, setIsGrading] = useState(false);
   const [error, setError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -174,21 +180,43 @@ export default function PlaygroundPage() {
     }
   }, [advanced, graderModelId, models, prompt, selectedModels]);
 
-  async function handleScore(
-    scores: Array<{ agentRunId: string; score: number; rationale?: string | undefined }>,
-  ) {
+  async function handleScore(scores: PlaygroundScoreInput[]) {
     if (!session) return;
     await scorePlayground(session.id, scores);
     const updated = await getPlaygroundSession(session.id);
     setSession(updated);
   }
 
-  async function handleAutoGrade() {
+  async function handleAutoGrade(graderIds: string[]) {
     if (!session) return;
-    await autoGradePlayground(session.id);
-    const updated = await getPlaygroundSession(session.id);
-    setSession(updated);
+    setIsGrading(true);
+    try {
+      await autoGradePlayground(session.id, graderIds);
+      const [updated, fetchedAutograders] = await Promise.all([
+        getPlaygroundSession(session.id),
+        getPlaygroundAutograders(session.id),
+      ]);
+      setSession(updated);
+      setAutograders(fetchedAutograders);
+    } finally {
+      setIsGrading(false);
+    }
   }
+
+  // Pull existing autograders when entering the Score step so re-grades show up
+  // on first paint instead of after the user clicks the button.
+  useEffect(() => {
+    if (step !== "score" || !session) return;
+    let cancelled = false;
+    getPlaygroundAutograders(session.id)
+      .then((rows) => {
+        if (!cancelled) setAutograders(rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [step, session?.id]);
 
   async function toggleSaved() {
     if (!session) return;
@@ -314,16 +342,16 @@ export default function PlaygroundPage() {
       )}
 
       {step === "score" && session && (
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <ScoringPanel
-            agentRuns={session.agentRuns}
-            sessionId={session.id}
-            graderModelId={session.graderModelId}
-            onScore={handleScore}
-            onAutoGrade={handleAutoGrade}
-            allCompleted={allCompleted}
-          />
-        </div>
+        <ScoreStep
+          session={session}
+          models={models}
+          autograders={autograders}
+          blind={blindScoring}
+          onBlindChange={setBlindScoring}
+          onSubmit={handleScore}
+          onAutoGrade={handleAutoGrade}
+          isGrading={isGrading}
+        />
       )}
     </div>
   );

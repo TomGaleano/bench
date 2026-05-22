@@ -3,8 +3,10 @@ import {
   boolean,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
+  smallint,
   text,
   timestamp,
   uuid,
@@ -68,12 +70,48 @@ export const playgroundAgentRuns = pgTable("playground_agent_runs", {
   output: text("output"),
   score: integer("score"),
   scoreRationale: text("score_rationale"),
+  scoreCorrectness: smallint("score_correctness"),
+  scoreCodeQuality: smallint("score_code_quality"),
+  scoreUx: smallint("score_ux"),
+  scoreShipIt: smallint("score_ship_it"),
   scoredAt: timestamp("scored_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   parentAgentRunId: uuid("parent_agent_run_id"),
   cancellationReason: text("cancellation_reason"),
+  fileCount: integer("file_count"),
+  loc: integer("loc"),
+});
+
+export const playgroundAutograderRuns = pgTable("playground_autograder_runs", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  sessionId: uuid("session_id")
+    .notNull()
+    .references(() => playgroundSessions.id, { onDelete: "cascade" }),
+  graderModelId: text("grader_model_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  latencyMs: integer("latency_ms"),
+  usdCost: numeric("usd_cost", { precision: 10, scale: 4 }),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+});
+
+export const playgroundAutograderScores = pgTable("playground_autograder_scores", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  autograderRunId: uuid("autograder_run_id")
+    .notNull()
+    .references(() => playgroundAutograderRuns.id, { onDelete: "cascade" }),
+  agentRunId: uuid("agent_run_id")
+    .notNull()
+    .references(() => playgroundAgentRuns.id, { onDelete: "cascade" }),
+  overall: integer("overall"),
+  correctness: smallint("correctness"),
+  codeQuality: smallint("code_quality"),
+  ux: smallint("ux"),
+  shipIt: smallint("ship_it"),
+  rationale: text("rationale"),
 });
 
 export const playgroundEvents = pgTable("playground_events", {
@@ -93,3 +131,7 @@ export type PlaygroundAgentRun = typeof playgroundAgentRuns.$inferSelect;
 export type NewPlaygroundAgentRun = typeof playgroundAgentRuns.$inferInsert;
 export type PlaygroundEvent = Omit<typeof playgroundEvents.$inferSelect, "ts"> & { timestamp: Date };
 export type NewPlaygroundEvent = typeof playgroundEvents.$inferInsert;
+export type PlaygroundAutograderRun = typeof playgroundAutograderRuns.$inferSelect;
+export type NewPlaygroundAutograderRun = typeof playgroundAutograderRuns.$inferInsert;
+export type PlaygroundAutograderScore = typeof playgroundAutograderScores.$inferSelect;
+export type NewPlaygroundAutograderScore = typeof playgroundAutograderScores.$inferInsert;

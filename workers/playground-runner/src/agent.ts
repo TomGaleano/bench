@@ -57,7 +57,33 @@ type RunUpdateBody = {
   output?: string;
   startedAt?: string;
   finishedAt?: string;
+  fileCount?: number;
+  loc?: number;
 };
+
+async function snapshotWorktreeStats(
+  sandbox: RuntimeWorkspace,
+  worktreePath: string,
+): Promise<{ fileCount: number | null; loc: number | null }> {
+  try {
+    const fileCountRes = await sandbox.run({
+      command: `find ${worktreePath} -type f -not -path '*/.*' -not -path '*/node_modules/*' | wc -l`,
+      timeoutMs: 5_000,
+    });
+    const fileCount = Number.parseInt(fileCountRes.stdout.trim(), 10);
+    const locRes = await sandbox.run({
+      command: `find ${worktreePath} -type f \\( -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.html' -o -name '*.css' -o -name '*.sh' -o -name '*.md' \\) -not -path '*/.*' -not -path '*/node_modules/*' -print0 2>/dev/null | xargs -0 wc -l 2>/dev/null | tail -n 1 | awk '{print $1}'`,
+      timeoutMs: 5_000,
+    });
+    const loc = Number.parseInt(locRes.stdout.trim(), 10);
+    return {
+      fileCount: Number.isFinite(fileCount) ? fileCount : null,
+      loc: Number.isFinite(loc) ? loc : null,
+    };
+  } catch {
+    return { fileCount: null, loc: null };
+  }
+}
 
 // ── Session orchestrator ────────────────────────────────────────────────────
 
@@ -340,12 +366,18 @@ async function runPlaygroundAgent(input: {
       await event("url_resolved", { url: resolvedUrl });
     }
 
+    // Snapshot the agent's worktree: file count and source LOC. The numbers
+    // power the Score-step comparison tiles and the leaderboard cost row.
+    const stats = await snapshotWorktreeStats(sandbox, worktreePath);
+
     const output = textChunks.join("");
 
     await postRunUpdate(ctx, {
       status: "succeeded",
       output,
       ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
+      ...(stats.fileCount != null ? { fileCount: stats.fileCount } : {}),
+      ...(stats.loc != null ? { loc: stats.loc } : {}),
       finishedAt: new Date().toISOString(),
     });
 
