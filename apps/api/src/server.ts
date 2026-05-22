@@ -11,6 +11,7 @@ import { healthRoutes } from "./routes/health.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { modelRoutes } from "./routes/models.js";
 import { runRoutes } from "./routes/runs.js";
+import { playgroundRoutes } from "./routes/playground.js";
 
 export function buildServer() {
   const fastify = Fastify({
@@ -35,6 +36,7 @@ export function buildServer() {
   void fastify.register(githubCaseRoutes);
   void fastify.register(gradingRoutes);
   void fastify.register(runRoutes, { eventBus });
+  void fastify.register(playgroundRoutes, { eventBus });
 
   return fastify;
 }

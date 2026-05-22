@@ -27,6 +27,32 @@ export const PI_RUNNER_IMPL_JOB_NAME = "pi-runner.impl";
 export const reproductionValidatorQueueName = "pilab.reproduction-validator";
 export const reproductionValidatorValidateJobName = "reproduction-validator.validate";
 
+// Playground exports
+export {
+  PLAYGROUND_QUEUE_NAME,
+  PLAYGROUND_RUN_JOB_NAME,
+  PLAYGROUND_RELEASE_CHANNEL,
+  createPlaygroundQueue,
+  createPlaygroundWorker,
+  createPlaygroundQueueEvents,
+  createPlaygroundSessionJobId,
+  createPlaygroundProgress,
+  enqueuePlaygroundSessionJob,
+  getPlaygroundSessionJobSummary,
+  publishPlaygroundRelease,
+  summarizePlaygroundJob,
+} from "./playground.js";
+
+export type {
+  PlaygroundSessionJobData,
+  PlaygroundSessionJobResult,
+  PlaygroundJobStage,
+  PlaygroundQueue,
+  PlaygroundWorker,
+  PlaygroundJobProgress,
+  PlaygroundJobSummary,
+} from "./playground.js";
+
 export type QueueName =
   | typeof caseBuilderQueueName
   | typeof validationRunnerQueueName

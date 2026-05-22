@@ -7,10 +7,9 @@ import { readdir, readFile } from "node:fs/promises";
 import {
   cloneRepoAtCommitInRuntime,
   createBenchmarkRuntime,
+  runSandboxPiAgent,
   type RuntimeWorkspace,
 } from "@pilab/runtime";
-
-import { runSandboxPiAgent } from "./sandbox-agent.js";
 
 const execFileAsync = promisify(execFile);
 

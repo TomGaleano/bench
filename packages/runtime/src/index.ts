@@ -27,6 +27,8 @@ export type RuntimeWorkspace = {
   } & RuntimeStreamHandlers): Promise<RuntimeCommandResult>;
   writeFile(input: { path: string; content: string; mode?: string }): Promise<void>;
   readFile(path: string): Promise<string>;
+  /** Resolve the public URL/host the sandbox provider serves the given port at. */
+  getHost(port: number): string;
   delete(): Promise<void>;
 };
 
@@ -166,6 +168,9 @@ function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
     async readFile(filePath) {
       return sandbox.files.read(filePath, { format: "text" });
     },
+    getHost(port) {
+      return `https://${sandbox.getHost(port)}`;
+    },
     async delete() {
       await sandbox.kill();
     },
@@ -253,3 +258,5 @@ export function shellQuote(value: string): string {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+export { runSandboxPiAgent, createSandboxEventParser } from "./sandbox-agent.js";

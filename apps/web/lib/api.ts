@@ -453,6 +453,208 @@ export async function getMetricsOverview() {
   return response.json() as Promise<MetricsOverview>;
 }
 
+// Playground API types
+export type PlaygroundStartRequest = {
+  prompt: string;
+  models: Array<{ id: string; name: string }>;
+  graderModelId?: string | undefined;
+};
+
+export type PlaygroundAgentRunResponse = {
+  id: string;
+  modelId: string;
+  modelName: string;
+  status: string;
+  sandboxId: string | null;
+  appUrl: string | null;
+  output: string | null;
+  score: number | null;
+  scoreRationale: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export type PlaygroundSessionResponse = {
+  id: string;
+  prompt: string;
+  status: string;
+  gradingMode: string | null;
+  graderModelId: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  saved: boolean;
+  agentRuns: PlaygroundAgentRunResponse[];
+};
+
+export type PlaygroundEventResponse = {
+  id: string;
+  agentRunId: string;
+  seq: number;
+  timestamp: string;
+  kind: string;
+  payload: unknown;
+};
+
+export async function startPlayground(payload: PlaygroundStartRequest) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/start`, {
+    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<PlaygroundSessionResponse>;
+}
+
+export async function listPlaygroundSessions() {
+  const response = await fetch(`${getApiBaseUrl()}/playground`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<PlaygroundSessionResponse[]>;
+}
+
+export async function getPlaygroundSession(sessionId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}`, { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<PlaygroundSessionResponse>;
+}
+
+export async function getPlaygroundEvents(sessionId: string, agentRunId?: string) {
+  const url = new URL(`${getApiBaseUrl()}/playground/${sessionId}/events`, typeof window === "undefined" ? "http://placeholder" : window.location.href);
+  if (agentRunId) url.searchParams.set("agentRunId", agentRunId);
+
+  const response = await fetch(url.toString().replace("http://placeholder", ""), { cache: "no-store" });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<PlaygroundEventResponse[]>;
+}
+
+export function openPlaygroundEventStream(
+  sessionId: string,
+  onEvent: (event: PlaygroundEventResponse) => void,
+  options?: { onConnected?: () => void; onClose?: () => void; onError?: (e: Event) => void },
+): WebSocket {
+  if (typeof window === "undefined") {
+    throw new Error("openPlaygroundEventStream is browser-only");
+  }
+  const httpBase = getApiBaseUrl(); // "/api" in browser
+  const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProto}//${window.location.host}${httpBase}/playground/${sessionId}/stream`;
+  const ws = new WebSocket(wsUrl);
+
+  ws.addEventListener("message", (msg) => {
+    try {
+      const data = JSON.parse(msg.data) as { type?: string; event?: { payload?: Record<string, unknown> } };
+      if (data.type === "connected") {
+        options?.onConnected?.();
+        return;
+      }
+      if (data.type !== "playground.event") return;
+      const wrapper = data.event?.payload;
+      if (!wrapper || typeof wrapper !== "object") return;
+      const w = wrapper as Record<string, unknown>;
+      if (w.source !== "playground") return;
+      const inner: PlaygroundEventResponse = {
+        id: String(w.eventId),
+        agentRunId: String(w.agentRunId),
+        seq: Number(w.seq),
+        timestamp: String(w.timestamp),
+        kind: String(w.kind),
+        payload: w.payload,
+      };
+      onEvent(inner);
+    } catch {
+      // ignore malformed frames
+    }
+  });
+  if (options?.onClose) ws.addEventListener("close", options.onClose);
+  if (options?.onError) ws.addEventListener("error", options.onError);
+  return ws;
+}
+
+export async function savePlaygroundSession(sessionId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/save`, { method: "POST" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ saved: boolean }>;
+}
+
+export async function unsavePlaygroundSession(sessionId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/unsave`, { method: "POST" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ saved: boolean }>;
+}
+
+export async function releasePlaygroundSandbox(sessionId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/release-sandbox`, { method: "POST" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<{ released: boolean }>;
+}
+
+export async function listSavedPlaygroundSessions() {
+  const response = await fetch(`${getApiBaseUrl()}/playground/saved`, { cache: "no-store" });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+  return response.json() as Promise<PlaygroundSessionResponse[]>;
+}
+
+export async function scorePlayground(sessionId: string, scores: Array<{ agentRunId: string; score: number; rationale?: string | undefined }>) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/score`, {
+    body: JSON.stringify({ scores }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ accepted: boolean }>;
+}
+
+export async function autoGradePlayground(sessionId: string) {
+  const response = await fetch(`${getApiBaseUrl()}/playground/${sessionId}/grade-auto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `API request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ accepted: boolean }>;
+}
+
 export async function listModels() {
   const response = await fetch(`${getApiBaseUrl()}/models`, { cache: "no-store" });
 

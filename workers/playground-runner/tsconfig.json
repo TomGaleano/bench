@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "disableSourceOfProjectReferenceRedirect": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/db" },
+    { "path": "../../packages/jobs" },
+    { "path": "../../packages/runtime" }
+  ]
+}

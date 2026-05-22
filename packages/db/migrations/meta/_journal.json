@@ -50,6 +50,20 @@
       "when": 1779047176078,
       "tag": "0006_abandoned_magus",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1779500000000,
+      "tag": "0007_playground_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1779600000000,
+      "tag": "0008_playground_session_saved",
+      "breakpoints": true
     }
   ]
 }

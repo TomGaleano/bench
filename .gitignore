@@ -17,5 +17,7 @@ tmp/
 output/
 test-results/
 .playwright-cli/
+.playwright/
 workers/runner-pi/output/
 .opencode/
+.claude/

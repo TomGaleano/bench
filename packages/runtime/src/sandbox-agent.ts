@@ -1,4 +1,4 @@
-import { shellQuote, type RuntimeWorkspace } from "@pilab/runtime";
+import { shellQuote, type RuntimeWorkspace } from "./index.js";
 
 export async function runSandboxPiAgent(input: {
   workspace: RuntimeWorkspace;
@@ -12,8 +12,15 @@ export async function runSandboxPiAgent(input: {
   timeoutMs: number;
   signal: AbortSignal;
   onEvent(event: unknown): void;
+  /**
+   * Optional working directory inside the sandbox. When set, the agent runs
+   * from this path (useful for git-worktree-per-agent setups) and the Pi SDK
+   * sees this as its `cwd`. Defaults to `workspace.rootPath`.
+   */
+  cwd?: string;
 }): Promise<void> {
-  const runtimeDir = ".pilab-agent-runtime";
+  const cwd = input.cwd ?? input.workspace.rootPath;
+  const runtimeDir = `${cwd}/.pilab-agent-runtime`;
   await input.workspace.writeFile({
     path: `${runtimeDir}/package.json`,
     content: JSON.stringify({
@@ -29,7 +36,7 @@ export async function runSandboxPiAgent(input: {
       modelName: input.modelName,
       prompt: input.prompt,
       systemPrompt: input.systemPrompt,
-      workspacePath: input.workspace.rootPath,
+      workspacePath: cwd,
       tools: input.tools,
     }),
   });
@@ -39,21 +46,21 @@ export async function runSandboxPiAgent(input: {
   });
 
   const install = await input.workspace.run({
-    command: `npm install --prefix ${shellQuote(`${input.workspace.rootPath}/${runtimeDir}`)} --no-audit --no-fund --silent`,
-    cwd: input.workspace.rootPath,
+    command: `npm install --prefix ${shellQuote(runtimeDir)} --no-audit --no-fund --silent`,
+    cwd,
     timeoutMs: 180_000,
     env: { CI: "true" },
   });
   if (install.exitCode !== 0) {
-    throw new Error(`Failed to install PI agent runtime in Daytona: ${install.stderr || install.stdout}`);
+    throw new Error(`Failed to install PI agent runtime in sandbox: ${install.stderr || install.stdout}`);
   }
 
   await withTimeout(
     new Promise<void>((resolve, reject) => {
       const parseStdout = createSandboxEventParser(input.onEvent, reject);
       input.workspace.runStreaming({
-        command: `node ${shellQuote(`${input.workspace.rootPath}/${runtimeDir}/run-pi-agent.mjs`)}`,
-        cwd: input.workspace.rootPath,
+        command: `node ${shellQuote(`${runtimeDir}/run-pi-agent.mjs`)}`,
+        cwd,
         timeoutMs: input.timeoutMs,
         env: { CI: "true", OPENROUTER_API_KEY: input.apiKey },
         onStdout: parseStdout,
@@ -107,8 +114,31 @@ const agentDir = path.join(config.workspacePath, ".pilab-agent");
 const authStorage = pi.AuthStorage.create(path.join(agentDir, "auth.json"));
 authStorage.setRuntimeApiKey(config.provider, apiKey);
 const modelRegistry = pi.ModelRegistry.create(authStorage);
-const modelNames = config.modelName.includes("/") ? [config.modelName.slice(config.modelName.indexOf("/") + 1), config.modelName] : [config.modelName];
-const model = modelNames.map((name) => modelRegistry.find(config.provider, name)).find(Boolean);
+const modelNames = config.modelName.includes("/")
+  ? [config.modelName, config.modelName.slice(config.modelName.indexOf("/") + 1)]
+  : [config.modelName];
+let model = modelNames.map((name) => modelRegistry.find(config.provider, name)).find(Boolean);
+if (!model) {
+  // Model not in the SDK's built-in registry — register it dynamically.
+  // When supplying \`models\`, the provider config requires baseUrl/apiKey/api too.
+  modelRegistry.registerProvider(config.provider, {
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    apiKey: "OPENROUTER_API_KEY",
+    api: "openai-completions",
+    authHeader: true,
+    models: [{
+      id: config.modelName,
+      name: config.modelName,
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128000,
+      maxTokens: 8192,
+    }],
+  });
+  model = modelRegistry.find(config.provider, config.modelName);
+}
 if (!model) throw new Error(\`Pi model not found for provider \${config.provider}: \${config.modelName}\`);
 
 const settingsManager = pi.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: true, maxRetries: 1 } });

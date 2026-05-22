@@ -12,6 +12,7 @@ import type { Job } from "bullmq";
 import {
   cloneRepoAtCommitInRuntime,
   createBenchmarkRuntime,
+  runSandboxPiAgent,
   shellQuote,
   type RuntimeWorkspace,
 } from "@pilab/runtime";
@@ -27,7 +28,6 @@ import {
   type PiRunnerInput,
   type PiRunnerResult,
 } from "./index.js";
-import { runSandboxPiAgent } from "./sandbox-agent.js";
 
 const execFileAsync = promisify(execFile);
 

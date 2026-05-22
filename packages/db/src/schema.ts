@@ -1418,3 +1418,5 @@ export type GraderVerdict = typeof graderVerdicts.$inferSelect;
 export type NewGraderVerdict = typeof graderVerdicts.$inferInsert;
 export type ReproductionStep = typeof reproductionSteps.$inferSelect;
 export type NewReproductionStep = typeof reproductionSteps.$inferInsert;
+
+export * from "./playground-schema.js";

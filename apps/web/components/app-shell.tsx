@@ -13,7 +13,9 @@ const labNav = [
   { href: "/experiments/new", label: "Experiment Setup", count: null },
   { href: "/runs", label: "Live Runs", count: null, live: true },
   { href: "/replay", label: "Replay", count: null },
-  { href: "/grading", label: "Plan Grading", count: null }
+  { href: "/grading", label: "Plan Grading", count: null },
+  { href: "/playground", label: "Playground", count: null },
+  { href: "/playground/saved", label: "Saved sessions", count: null }
 ];
 
 const libraryNav = [
