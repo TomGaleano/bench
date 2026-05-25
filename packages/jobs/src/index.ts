@@ -32,6 +32,8 @@ export {
   PLAYGROUND_QUEUE_NAME,
   PLAYGROUND_RUN_JOB_NAME,
   PLAYGROUND_RELEASE_CHANNEL,
+  PLAYGROUND_CANCEL_RUN_CHANNEL,
+  PLAYGROUND_FOLLOW_UP_CHANNEL,
   createPlaygroundQueue,
   createPlaygroundWorker,
   createPlaygroundQueueEvents,
@@ -40,6 +42,8 @@ export {
   enqueuePlaygroundSessionJob,
   getPlaygroundSessionJobSummary,
   publishPlaygroundRelease,
+  publishPlaygroundCancelRun,
+  publishPlaygroundFollowUp,
   summarizePlaygroundJob,
 } from "./playground.js";
 
@@ -51,6 +55,7 @@ export type {
   PlaygroundWorker,
   PlaygroundJobProgress,
   PlaygroundJobSummary,
+  PlaygroundSandboxImage,
 } from "./playground.js";
 
 export type QueueName =

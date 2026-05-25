@@ -18,9 +18,22 @@ export async function runSandboxPiAgent(input: {
    * sees this as its `cwd`. Defaults to `workspace.rootPath`.
    */
   cwd?: string;
+  /**
+   * Optional absolute path inside the sandbox for the JSONL follow-up inbox.
+   * When set, the script keeps the Pi session alive after the first prompt
+   * completes and tails this file for additional turns (`{ "text": "..." }`
+   * lines). Send `{ "done": true }` to exit cleanly. Defaults to
+   * `${cwd}/.pilab-followups.jsonl`. If you don't want follow-up support,
+   * pass `null` and the script exits as soon as the first prompt resolves.
+   */
+  followUpInboxPath?: string | null;
 }): Promise<void> {
   const cwd = input.cwd ?? input.workspace.rootPath;
   const runtimeDir = `${cwd}/.pilab-agent-runtime`;
+  const followUpInboxPath =
+    input.followUpInboxPath === null
+      ? null
+      : input.followUpInboxPath ?? `${cwd}/.pilab-followups.jsonl`;
   await input.workspace.writeFile({
     path: `${runtimeDir}/package.json`,
     content: JSON.stringify({
@@ -38,8 +51,14 @@ export async function runSandboxPiAgent(input: {
       systemPrompt: input.systemPrompt,
       workspacePath: cwd,
       tools: input.tools,
+      followUpInboxPath,
     }),
   });
+  if (followUpInboxPath) {
+    // Pre-create the inbox so the script's stat() loop has something to read
+    // before any follow-up has been written.
+    await input.workspace.writeFile({ path: followUpInboxPath, content: "" });
+  }
   await input.workspace.writeFile({
     path: `${runtimeDir}/run-pi-agent.mjs`,
     content: runtimePiAgentScript(),
@@ -100,7 +119,7 @@ export function createSandboxEventParser(onEvent: (event: unknown) => void, reje
 }
 
 function runtimePiAgentScript(): string {
-  return `import { readFileSync } from "node:fs";
+  return `import { readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import path from "node:path";
 import * as pi from "@mariozechner/pi-coding-agent";
 
@@ -157,7 +176,63 @@ const { session } = await pi.createAgentSession({
   settingsManager,
 });
 const unsubscribe = session.subscribe((event) => emit(event));
-try { await session.prompt(config.prompt); } finally { unsubscribe(); session.dispose(); }
+
+function emitTurnComplete(turn, status, message) {
+  emit({ type: "pilab_turn_complete", turn, status, message });
+}
+
+let turn = 0;
+let done = false;
+
+async function runPrompt(text) {
+  turn++;
+  try {
+    await session.prompt(text);
+    emitTurnComplete(turn, "ok");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    emitTurnComplete(turn, "error", message);
+  }
+}
+
+try {
+  await runPrompt(config.prompt);
+
+  if (config.followUpInboxPath) {
+    let cursor = 0;
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    while (!done) {
+      let size = 0;
+      try { size = statSync(config.followUpInboxPath).size; } catch { size = 0; }
+      if (size > cursor) {
+        const fd = openSync(config.followUpInboxPath, "r");
+        try {
+          const length = size - cursor;
+          const buf = Buffer.alloc(length);
+          readSync(fd, buf, 0, length, cursor);
+          cursor = size;
+          const chunk = buf.toString("utf8");
+          const lines = chunk.split("\\n").filter((l) => l.trim().length > 0);
+          for (const line of lines) {
+            let parsed = null;
+            try { parsed = JSON.parse(line); } catch { /* skip malformed line */ }
+            if (!parsed) continue;
+            if (parsed.done === true) { done = true; break; }
+            if (typeof parsed.text === "string" && parsed.text.length > 0) {
+              await runPrompt(parsed.text);
+            }
+          }
+        } finally {
+          closeSync(fd);
+        }
+      }
+      if (!done) await sleep(1000);
+    }
+  }
+} finally {
+  unsubscribe();
+  session.dispose();
+}
 `;
 }
 

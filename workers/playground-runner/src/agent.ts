@@ -1,4 +1,15 @@
-import { createBenchmarkRuntime, runSandboxPiAgent, type RuntimeProvider, type RuntimeWorkspace } from "@pilab/runtime";
+import { createBenchmarkRuntime, runSandboxPiAgent, shellQuote, type RuntimeProvider, type RuntimeWorkspace } from "@pilab/runtime";
+
+export type AgentInbox = {
+  appendFollowUp(text: string): Promise<void>;
+  sendDone(): Promise<void>;
+};
+
+type AgentHandle = {
+  result: AgentRunResult;
+  inbox: AgentInbox;
+  scriptDone: Promise<void>;
+};
 
 const SETUP_PYTHON_SCRIPT = `
 set -euo pipefail
@@ -14,6 +25,12 @@ const PLAYGROUND_TOOLS = ["read", "write", "edit", "grep", "find", "ls", "bash"]
 
 const PLAYGROUND_ROOT = "/home/user/playground";
 const BASE_PORT = 30000;
+
+function sanitizeTools(tools: string[] | undefined): string[] {
+  if (!tools || tools.length === 0) return PLAYGROUND_TOOLS;
+  const filtered = tools.filter((t) => PLAYGROUND_TOOLS.includes(t) || t === "network");
+  return filtered.length > 0 ? filtered : PLAYGROUND_TOOLS;
+}
 
 export type AgentRunSpec = {
   agentRunId: string;
@@ -40,7 +57,9 @@ type AppendEventBody = {
     | "tool_call_finished"
     | "port_open"
     | "url_resolved"
-    | "error";
+    | "error"
+    | "user_follow_up"
+    | "turn_complete";
   payload?: Record<string, unknown>;
 };
 
@@ -51,7 +70,68 @@ type RunUpdateBody = {
   output?: string;
   startedAt?: string;
   finishedAt?: string;
+  fileCount?: number;
+  loc?: number;
 };
+
+async function pollForListeningPort(
+  sandbox: RuntimeWorkspace,
+  port: number,
+  appUrl: string,
+): Promise<string | null> {
+  // Roughly 15 seconds: 8 attempts with 2 s gap. Each command is fast so the
+  // wall-clock cost is mostly idle wait, which is also when the user is
+  // staring at the live grid waiting for the iframe to be useful.
+  const attempts = 8;
+  const intervalMs = 2_000;
+  // Prefer `ss` because it works on every modern Linux base image; fall back
+  // to `netstat` (busybox) or to `/proc/net/tcp` parsing if neither is
+  // installed. We ask for any of them in one composite command so we only
+  // round-trip once per poll.
+  const probe = [
+    `(ss -tln 2>/dev/null | awk 'NR>1 {print $4}'`,
+    `|| netstat -tln 2>/dev/null | awk 'NR>2 {print $4}'`,
+    `|| awk '/:/{print $2}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -F: '{print strtonum("0x"$2)}')`,
+    `| sed 's/.*://' | sort -u`,
+  ].join(" ");
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const res = await sandbox.run({ command: probe, timeoutMs: 5_000 });
+    const open = res.stdout
+      .split("\n")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isInteger(n) && n > 1024 && n < 65535);
+    if (open.includes(port)) return appUrl;
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  return null;
+}
+
+async function snapshotWorktreeStats(
+  sandbox: RuntimeWorkspace,
+  worktreePath: string,
+): Promise<{ fileCount: number | null; loc: number | null }> {
+  try {
+    const fileCountRes = await sandbox.run({
+      command: `find ${worktreePath} -type f -not -path '*/.*' -not -path '*/node_modules/*' | wc -l`,
+      timeoutMs: 5_000,
+    });
+    const fileCount = Number.parseInt(fileCountRes.stdout.trim(), 10);
+    const locRes = await sandbox.run({
+      command: `find ${worktreePath} -type f \\( -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.jsx' -o -name '*.html' -o -name '*.css' -o -name '*.sh' -o -name '*.md' \\) -not -path '*/.*' -not -path '*/node_modules/*' -print0 2>/dev/null | xargs -0 wc -l 2>/dev/null | tail -n 1 | awk '{print $1}'`,
+      timeoutMs: 5_000,
+    });
+    const loc = Number.parseInt(locRes.stdout.trim(), 10);
+    return {
+      fileCount: Number.isFinite(fileCount) ? fileCount : null,
+      loc: Number.isFinite(loc) ? loc : null,
+    };
+  } catch {
+    return { fileCount: null, loc: null };
+  }
+}
 
 // ── Session orchestrator ────────────────────────────────────────────────────
 
@@ -67,8 +147,38 @@ export async function runPlaygroundSession(input: {
   signal: AbortSignal;
   /** Resolves when the API publishes a release signal for this session, or on internal timeout. */
   waitForRelease(sessionId: string, timeoutMs: number): Promise<void>;
+  /** Hook for the worker to register a per-agent AbortController so cancel-run signals can hit it. */
+  registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
+  /** Hook for the worker to register a follow-up inbox per agent. The worker
+   *  invokes `appendFollowUp` when a user sends a new turn over Redis. */
+  registerFollowUpInbox?: (agentRunId: string, inbox: AgentInbox) => () => void;
+  tools?: string[];
+  seedPromptText?: string;
+  sandboxImage?: string;
 }): Promise<{ sandboxId: string | null; agentResults: AgentRunResult[] }> {
-  const { apiBaseUrl, sessionId, prompt, agentRuns, apiKey, maxWallClockSeconds, maxReviewSeconds, signal, waitForRelease } = input;
+  const {
+    apiBaseUrl,
+    sessionId,
+    prompt,
+    agentRuns,
+    apiKey,
+    maxWallClockSeconds,
+    maxReviewSeconds,
+    signal,
+    waitForRelease,
+    registerAgentSignal,
+    registerFollowUpInbox,
+    tools,
+    seedPromptText,
+    sandboxImage,
+  } = input;
+
+  const allowedTools = sanitizeTools(tools);
+  if (sandboxImage && sandboxImage !== "py-node") {
+    console.log(
+      `[playground-runner] session ${sessionId.slice(0, 8)} requested sandbox image "${sandboxImage}" — only py-node is wired up; using default.`,
+    );
+  }
 
   let sandbox: RuntimeWorkspace | null = null;
   const peerNames = agentRuns.map((a) => a.modelName);
@@ -137,10 +247,28 @@ export async function runPlaygroundSession(input: {
       if (wt.exitCode !== 0) {
         throw new Error(`worktree add for ${plan.branch} failed: ${wt.stderr || wt.stdout}`);
       }
+
+      // If the user supplied a seed prompt, drop it into each worktree as SEED.md
+      // before the agent starts so its first read pass picks it up.
+      if (seedPromptText && seedPromptText.trim().length > 0) {
+        const encoded = Buffer.from(seedPromptText, "utf8").toString("base64");
+        const seed = await sandbox.run({
+          command: `echo '${encoded}' | base64 -d > ${plan.worktreePath}/SEED.md`,
+          timeoutMs: 15_000,
+        });
+        if (seed.exitCode !== 0) {
+          console.warn(
+            `[playground-runner] failed to write SEED.md for ${plan.branch}: ${seed.stderr || seed.stdout}`,
+          );
+        }
+      }
     }
 
-    // Run all agents in parallel.
-    const results = await Promise.all(
+    // Kick off every agent in parallel. Each returns a handle: { result, inbox,
+    // scriptDone }. We wait for the first turn (`result`) before holding for
+    // review; the underlying script stays alive in the sandbox so the worker
+    // can pipe follow-up turns into the agent's inbox file.
+    const handles = await Promise.all(
       worktreePlans.map((plan) =>
         runPlaygroundAgent({
           apiBaseUrl,
@@ -158,21 +286,53 @@ export async function runPlaygroundSession(input: {
           apiKey,
           maxWallClockSeconds,
           signal,
-        }).catch((err): AgentRunResult => ({
-          agentRunId: plan.spec.agentRunId,
-          status: "failed",
-          appUrl: null,
-          output: "",
-          errorMessage: err instanceof Error ? err.message : String(err),
+          tools: allowedTools,
+          hasSeed: Boolean(seedPromptText && seedPromptText.trim().length > 0),
+          ...(registerAgentSignal ? { registerAgentSignal } : {}),
+        }).catch((err): AgentHandle => ({
+          result: {
+            agentRunId: plan.spec.agentRunId,
+            status: "failed",
+            appUrl: null,
+            output: "",
+            errorMessage: err instanceof Error ? err.message : String(err),
+          },
+          inbox: { appendFollowUp: async () => undefined, sendDone: async () => undefined },
+          scriptDone: Promise.resolve(),
         })),
       ),
     );
 
-    // Keep the sandbox alive so the human can poke around the agents' apps via the
-    // resolved URLs. Either the frontend signals release (button / score submit) or
-    // we time out after maxReviewSeconds.
-    console.log(`[playground-runner] session ${sessionId.slice(0, 8)} agents finished — holding sandbox for review (max ${maxReviewSeconds}s)`);
+    const results = handles.map((h) => h.result);
+
+    // Register each agent's inbox with the worker so external follow-up
+    // pub/sub events can flow into it.
+    const unregisterInboxes: Array<() => void> = [];
+    if (registerFollowUpInbox) {
+      for (let i = 0; i < worktreePlans.length; i++) {
+        const plan = worktreePlans[i]!;
+        const handle = handles[i]!;
+        unregisterInboxes.push(registerFollowUpInbox(plan.spec.agentRunId, handle.inbox));
+      }
+    }
+
+    // Keep the sandbox alive so the human can poke around the agents' apps and
+    // send follow-up turns. Either the frontend signals release (button /
+    // score submit) or we time out after maxReviewSeconds.
+    console.log(`[playground-runner] session ${sessionId.slice(0, 8)} first turns finished — holding sandbox for review (max ${maxReviewSeconds}s)`);
     await waitForRelease(sessionId, maxReviewSeconds * 1000);
+
+    // Tell every script to exit cleanly, then wait for them (with a short
+    // timeout so a misbehaving script can't block the sandbox tear-down).
+    for (const handle of handles) {
+      await handle.inbox.sendDone().catch(() => undefined);
+    }
+    await Promise.race([
+      Promise.allSettled(handles.map((h) => h.scriptDone)),
+      new Promise<void>((resolve) => setTimeout(resolve, 30_000)),
+    ]);
+
+    for (const unreg of unregisterInboxes) unreg();
 
     return { sandboxId, agentResults: results };
   } finally {
@@ -201,22 +361,97 @@ async function runPlaygroundAgent(input: {
   apiKey: string;
   maxWallClockSeconds: number;
   signal: AbortSignal;
-}): Promise<AgentRunResult> {
+  tools: string[];
+  hasSeed: boolean;
+  registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
+}): Promise<AgentHandle> {
   const {
     apiBaseUrl, sessionId, sandbox, prompt,
     spec, index, totalAgents, peers,
     worktreePath, branch, assignedPort, appUrl,
     apiKey, maxWallClockSeconds, signal,
+    tools, hasSeed, registerAgentSignal,
   } = input;
 
   const ctx = { apiBaseUrl, sessionId, agentRunId: spec.agentRunId };
   let seq = 1;
   const nextSeq = () => ++seq;
   const textChunks: string[] = [];
+  const followUpInboxPath = `${worktreePath}/.pilab-followups.jsonl`;
+
+  // Local AbortController chained off the session signal so cancel-run can target one agent.
+  const localController = new AbortController();
+  const abortLocal = () => localController.abort();
+  signal.addEventListener("abort", abortLocal, { once: true });
+  const unregister = registerAgentSignal?.(spec.agentRunId, abortLocal) ?? (() => undefined);
 
   const event = async (kind: AppendEventBody["kind"], payload: Record<string, unknown>) => {
     await postEvent(ctx, { kind, payload }, nextSeq());
   };
+
+  // Inbox file lives next to the worktree. The runtime pre-creates it.
+  // appendFollowUp writes a JSONL line; sendDone writes the {done:true} sentinel.
+  const inbox: AgentInbox = {
+    async appendFollowUp(text: string) {
+      const line = JSON.stringify({ text });
+      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
+      await sandbox.run({
+        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
+        timeoutMs: 5_000,
+      });
+    },
+    async sendDone() {
+      const line = JSON.stringify({ done: true });
+      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
+      await sandbox.run({
+        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
+        timeoutMs: 5_000,
+      });
+    },
+  };
+
+  let firstTurnResolve!: (value: AgentRunResult) => void;
+  let firstTurnReject!: (err: Error) => void;
+  const firstTurnPromise = new Promise<AgentRunResult>((resolve, reject) => {
+    firstTurnResolve = resolve;
+    firstTurnReject = reject;
+  });
+  let firstTurnDone = false;
+  let turnInFlight: Promise<void> = Promise.resolve();
+
+  // Handler called whenever the script emits a `pilab_turn_complete` event.
+  // Re-polls for a listening port + snapshots the worktree, posts a run update.
+  async function handleTurnComplete(turn: number) {
+    try {
+      const resolvedUrl = await pollForListeningPort(sandbox, assignedPort, appUrl);
+      if (resolvedUrl) {
+        await event("port_open", { port: assignedPort });
+        await event("url_resolved", { url: resolvedUrl });
+      }
+      const stats = await snapshotWorktreeStats(sandbox, worktreePath);
+      await event("turn_complete", { turn });
+      const output = textChunks.join("");
+      await postRunUpdate(ctx, {
+        status: "succeeded",
+        output,
+        ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
+        ...(stats.fileCount != null ? { fileCount: stats.fileCount } : {}),
+        ...(stats.loc != null ? { loc: stats.loc } : {}),
+        finishedAt: new Date().toISOString(),
+      });
+      if (!firstTurnDone) {
+        firstTurnDone = true;
+        firstTurnResolve({
+          agentRunId: spec.agentRunId,
+          status: "succeeded",
+          appUrl: resolvedUrl,
+          output,
+        });
+      }
+    } catch (err) {
+      console.error(`[playground-runner] handleTurnComplete error for ${spec.agentRunId.slice(0, 8)}:`, err);
+    }
+  }
 
   try {
     await event("status", {
@@ -237,75 +472,106 @@ async function runPlaygroundAgent(input: {
       branch,
       assignedPort,
       appUrl,
+      hasSeed,
     });
 
-    await runSandboxPiAgent({
+    // Kick off the long-running script. Don't await; we resolve from the
+    // first `pilab_turn_complete` event instead.
+    const scriptDone = runSandboxPiAgent({
       workspace: sandbox,
       runId: spec.agentRunId,
       provider: "openrouter",
-      // Pass the full OpenRouter slashed id (e.g. "x-ai/grok-4"). The sandbox script
-      // tries the built-in registry first and dynamically registers the model otherwise.
       modelName: spec.modelId,
       prompt,
       systemPrompt,
       apiKey,
-      tools: PLAYGROUND_TOOLS,
+      tools,
       timeoutMs: maxWallClockSeconds * 1000,
-      signal,
+      signal: localController.signal,
       cwd: worktreePath,
+      followUpInboxPath,
       onEvent: (sdkEvent: unknown) => {
+        if (isTurnCompleteEvent(sdkEvent)) {
+          const turn = typeof sdkEvent.turn === "number" ? sdkEvent.turn : 1;
+          turnInFlight = turnInFlight.then(() => handleTurnComplete(turn));
+          return;
+        }
         const mapped = mapPiSdkEventToPlayground(sdkEvent);
         if (!mapped) return;
         if (mapped.textDelta) textChunks.push(mapped.textDelta);
         void postEvent(ctx, { kind: mapped.kind, payload: mapped.payload }, nextSeq());
       },
+    }).catch(async (err: unknown) => {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      if (!firstTurnDone) {
+        // Make sure the playground transcript records the failure even when
+        // it happens before the first turn ever completes.
+        try {
+          await event("error", { error: errorMessage });
+          const output = textChunks.join("");
+          await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+        } finally {
+          firstTurnDone = true;
+          const cancelled = localController.signal.aborted && !signal.aborted;
+          firstTurnReject(new Error(cancelled ? "cancelled_by_user" : errorMessage));
+        }
+      } else {
+        console.warn(`[playground-runner] script for ${spec.agentRunId.slice(0, 8)} exited after first turn: ${errorMessage}`);
+      }
     });
 
-    // Is the agent's assigned port now listening?
-    await event("status", { status: "resolving_url" });
-    const portCheck = await sandbox.run({
-      command: `ss -tlnp 2>/dev/null | awk 'NR>1 {print $4}' | sed 's/.*://' | sort -u || true`,
-      timeoutMs: 5_000,
-    });
-    const openPorts = new Set(
-      portCheck.stdout
-        .split("\n")
-        .map((s) => Number(s.trim()))
-        .filter((n) => Number.isInteger(n) && n > 1024 && n < 65535),
+    // Make sure listeners on `scriptDone` resolve cleanly even if the catch
+    // above swallows an error after the first turn.
+    const scriptDoneCleaned = scriptDone.then(
+      () => undefined,
+      () => undefined,
     );
-    const resolvedUrl = openPorts.has(assignedPort) ? appUrl : null;
-    if (resolvedUrl) {
-      await event("port_open", { port: assignedPort });
-      await event("url_resolved", { url: resolvedUrl });
-    }
 
-    const output = textChunks.join("");
-
-    await postRunUpdate(ctx, {
-      status: "succeeded",
-      output,
-      ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
-      finishedAt: new Date().toISOString(),
-    });
-
-    return { agentRunId: spec.agentRunId, status: "succeeded", appUrl: resolvedUrl, output };
-  } catch (err) {
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    await event("error", { error: errorMessage });
-    const output = textChunks.join("");
-    await postRunUpdate(ctx, {
-      status: "failed",
-      output,
-      finishedAt: new Date().toISOString(),
-    });
-    return {
+    const result = await firstTurnPromise.catch((err: unknown): AgentRunResult => ({
       agentRunId: spec.agentRunId,
-      status: signal.aborted ? "timed_out" : "failed",
+      status: "failed",
       appUrl: null,
-      output,
-      errorMessage,
+      output: textChunks.join(""),
+      errorMessage: err instanceof Error ? err.message : String(err),
+    }));
+
+    return {
+      result,
+      inbox,
+      scriptDone: scriptDoneCleaned.finally(() => {
+        signal.removeEventListener("abort", abortLocal);
+        unregister();
+      }),
+    };
+  } catch (err) {
+    signal.removeEventListener("abort", abortLocal);
+    unregister();
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    const output = textChunks.join("");
+    try { await event("error", { error: errorMessage }); } catch { /* ignore */ }
+    try {
+      await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+    } catch { /* ignore */ }
+    return {
+      result: {
+        agentRunId: spec.agentRunId,
+        status: "failed",
+        appUrl: null,
+        output,
+        errorMessage,
+      },
+      inbox,
+      scriptDone: Promise.resolve(),
     };
   }
+}
+
+function isTurnCompleteEvent(value: unknown): value is { type: "pilab_turn_complete"; turn?: number; status?: string; message?: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as Record<string, unknown>).type === "pilab_turn_complete"
+  );
 }
 
 // ── System prompt builder ───────────────────────────────────────────────────
@@ -319,14 +585,18 @@ function buildSystemPrompt(env: {
   branch: string;
   assignedPort: number;
   appUrl: string;
+  hasSeed?: boolean;
 }): string {
   const peerLine = env.peers.length > 0
     ? `Competing agents in this session: ${env.peers.join(", ")}.`
     : `You are the only agent in this session.`;
+  const seedLine = env.hasSeed
+    ? `\nThere is a SEED.md file in your working directory that contains starter context for this task. Read it first before doing anything else.\n`
+    : "";
 
   return [
     `You are agent ${env.agentIndex + 1} of ${env.totalAgents} (${env.modelName}) in a head-to-head playground session. ${peerLine}`,
-    ``,
+    seedLine,
     `# Environment`,
     `You are running inside a shared E2B Linux sandbox with Python 3 and Node.js available. You share this sandbox with the other agents above.`,
     ``,
@@ -342,7 +612,7 @@ function buildSystemPrompt(env: {
     `- Build a complete, working application that satisfies the user's prompt.`,
     `- Prefer a small set of files in a single directory. Use whatever stack fits the task.`,
     `- If you start a web server, bind to **0.0.0.0:${env.assignedPort}** and leave it running so the human grader can open ${env.appUrl}.`,
-    `- Verify your work briefly (curl, --help, smoke tests) before finishing.`,
+    `- Start the server in the background (e.g. \`nohup python3 app.py > server.log 2>&1 &\`), then **verify it is actually listening** with \`curl -fsS http://127.0.0.1:${env.assignedPort}/ -o /dev/null && echo LISTENING\` before writing your FINAL message. If curl fails, fix the server first.`,
     `- When you are done, write a final message starting with **"FINAL:"** that summarizes what you built, how to run it, and (if it's a server) includes the public URL ${env.appUrl}.`,
   ].join("\n");
 }

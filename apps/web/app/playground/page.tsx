@@ -1,11 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Hero } from "../../components/ui/Hero";
-import { ModelPicker } from "../../components/playground/ModelPicker";
-import { AgentPanel } from "../../components/playground/AgentPanel";
-import { ScoringPanel } from "../../components/playground/ScoringPanel";
+import { ComposeStep } from "../../components/playground/ComposeStep";
+import { LiveStep } from "../../components/playground/LiveStep";
+import { ScoreStep } from "../../components/playground/ScoreStep";
+import { NoModelsState, AllAgentsFailedState } from "../../components/playground/ErrorStates";
+import {
+  PLAYGROUND_ADVANCED_DEFAULTS,
+  type PlaygroundAdvancedOptions,
+} from "../../components/playground/AdvancedDrawer";
 import {
   listModels,
   startPlayground,
@@ -14,12 +19,18 @@ import {
   openPlaygroundEventStream,
   scorePlayground,
   autoGradePlayground,
+  getPlaygroundAutograders,
   savePlaygroundSession,
   unsavePlaygroundSession,
   releasePlaygroundSandbox,
+  stopPlaygroundAgentRun,
+  sendPlaygroundFollowUp,
+  PlaygroundFollowUpError,
   type ModelInfo,
+  type PlaygroundAutograderRunResponse,
   type PlaygroundSessionResponse,
   type PlaygroundEventResponse,
+  type PlaygroundScoreInput,
 } from "../../lib/api";
 
 type Step = "compose" | "live" | "score";
@@ -30,16 +41,23 @@ export default function PlaygroundPage() {
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [prompt, setPrompt] = useState("");
   const [graderModelId, setGraderModelId] = useState("");
+  const [advanced, setAdvanced] = useState<PlaygroundAdvancedOptions>(PLAYGROUND_ADVANCED_DEFAULTS);
+  const [launching, setLaunching] = useState(false);
 
   const [session, setSession] = useState<PlaygroundSessionResponse | null>(null);
   const [sessionEvents, setSessionEvents] = useState<PlaygroundEventResponse[]>([]);
+  const [autograders, setAutograders] = useState<PlaygroundAutograderRunResponse[]>([]);
+  const [blindScoring, setBlindScoring] = useState(false);
+  const [isGrading, setIsGrading] = useState(false);
   const [error, setError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     listModels()
       .then((data) => setModels(data))
-      .catch(() => undefined);
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   function toggleModel(id: string) {
@@ -54,6 +72,18 @@ export default function PlaygroundPage() {
     });
   }
 
+  function removeSelected(id: string) {
+    setSelectedModels((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function applyPreset(modelIds: string[]) {
+    setSelectedModels(new Set(modelIds.slice(0, 5)));
+  }
+
   // Subscribe to the WebSocket stream + light session-status polling.
   useEffect(() => {
     if (!session || step !== "live") return;
@@ -61,7 +91,6 @@ export default function PlaygroundPage() {
     const sessionId = session.id;
     let cancelled = false;
 
-    // Backfill events emitted before WS opened, then attach to the stream.
     getPlaygroundEvents(sessionId)
       .then((initial) => {
         if (cancelled) return;
@@ -74,7 +103,6 @@ export default function PlaygroundPage() {
       (event) => {
         setSessionEvents((prev) => {
           if (prev.some((e) => e.id === event.id)) return prev;
-          // Insert preserving seq order
           const next = [...prev, event];
           next.sort((a, b) => a.seq - b.seq);
           return next;
@@ -84,9 +112,6 @@ export default function PlaygroundPage() {
     );
     wsRef.current = ws;
 
-    // Session-status polling: slower than the old loop now that events stream.
-    // Do NOT auto-advance to the scoring step — the user clicks "Continue to scoring →"
-    // when they're ready to leave the live transcripts.
     const pollSession = async () => {
       try {
         const updated = await getPlaygroundSession(sessionId);
@@ -96,7 +121,7 @@ export default function PlaygroundPage() {
         /* ignore */
       }
     };
-    pollSession();
+    void pollSession();
     const interval = setInterval(pollSession, 4000);
 
     return () => {
@@ -107,11 +132,32 @@ export default function PlaygroundPage() {
     };
   }, [session?.id, step]);
 
-  const canLaunch = prompt.trim().length >= 10 && selectedModels.size >= 2 && selectedModels.size <= 5;
+  const canLaunch =
+    prompt.trim().length >= 10 &&
+    selectedModels.size >= 2 &&
+    selectedModels.size <= 5 &&
+    !launching;
 
-  async function handleLaunch() {
+  const allCompleted = useMemo(
+    () =>
+      session?.agentRuns.every(
+        (r) => r.status === "succeeded" || r.status === "failed",
+      ) ?? false,
+    [session],
+  );
+  const allFailed = useMemo(
+    () =>
+      Boolean(
+        session &&
+          session.agentRuns.length > 0 &&
+          session.agentRuns.every((r) => r.status === "failed"),
+      ),
+    [session],
+  );
+
+  const handleLaunch = useCallback(async () => {
     setError("");
-
+    setLaunching(true);
     try {
       const result = await startPlayground({
         prompt: prompt.trim(),
@@ -120,29 +166,60 @@ export default function PlaygroundPage() {
           return { id, name: m?.name ?? id };
         }),
         ...(graderModelId.trim() ? { graderModelId: graderModelId.trim() } : {}),
+        maxWallClockSeconds: advanced.maxWallClockSeconds,
+        maxOutputTokensPerAgent: advanced.maxOutputTokensPerAgent,
+        tools: advanced.tools,
+        sandboxImage: advanced.sandboxImage,
+        seedPromptText: advanced.seedPromptText,
+        runTwiceAndAverage: advanced.runTwiceAndAverage,
       });
-
       setSession(result);
       setSessionEvents([]);
       setStep("live");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLaunching(false);
     }
-  }
+  }, [advanced, graderModelId, models, prompt, selectedModels]);
 
-  async function handleScore(scores: Array<{ agentRunId: string; score: number; rationale?: string | undefined }>) {
+  async function handleScore(scores: PlaygroundScoreInput[]) {
     if (!session) return;
     await scorePlayground(session.id, scores);
     const updated = await getPlaygroundSession(session.id);
     setSession(updated);
   }
 
-  async function handleAutoGrade() {
+  async function handleAutoGrade(graderIds: string[]) {
     if (!session) return;
-    await autoGradePlayground(session.id);
-    const updated = await getPlaygroundSession(session.id);
-    setSession(updated);
+    setIsGrading(true);
+    try {
+      await autoGradePlayground(session.id, graderIds);
+      const [updated, fetchedAutograders] = await Promise.all([
+        getPlaygroundSession(session.id),
+        getPlaygroundAutograders(session.id),
+      ]);
+      setSession(updated);
+      setAutograders(fetchedAutograders);
+    } finally {
+      setIsGrading(false);
+    }
   }
+
+  // Pull existing autograders when entering the Score step so re-grades show up
+  // on first paint instead of after the user clicks the button.
+  useEffect(() => {
+    if (step !== "score" || !session) return;
+    let cancelled = false;
+    getPlaygroundAutograders(session.id)
+      .then((rows) => {
+        if (!cancelled) setAutograders(rows);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [step, session?.id]);
 
   async function toggleSaved() {
     if (!session) return;
@@ -159,56 +236,88 @@ export default function PlaygroundPage() {
     }
   }
 
-  const allCompleted = useMemo(
-    () => session?.agentRuns.every((r) => r.status === "succeeded" || r.status === "failed") ?? false,
-    [session],
-  );
-  const allFailed = useMemo(
-    () =>
-      Boolean(
-        session &&
-          session.agentRuns.length > 0 &&
-          session.agentRuns.every((r) => r.status === "failed"),
-      ),
-    [session],
-  );
+  async function handleStopAgent(agentRunId: string) {
+    if (!session) return;
+    try {
+      await stopPlaygroundAgentRun(session.id, agentRunId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
-  const heroActions = step !== "compose" && session ? (
-    <div style={{ display: "flex", gap: 8 }}>
-      <button
-        className="btn2"
-        onClick={toggleSaved}
-        type="button"
-        title={session.saved ? "Unsave" : "Save session"}
-        aria-label={session.saved ? "Unsave session" : "Save session"}
-        style={{ color: session.saved ? "#f59e0b" : undefined }}
-      >
-        {session.saved ? "★ Saved" : "☆ Save"}
-      </button>
-      <Link className="btn2" href={`/playground`}>← New playground</Link>
-      <Link className="btn2" href={`/playground/saved`}>Saved sessions</Link>
-    </div>
-  ) : (
-    <Link className="btn2" href={`/playground/saved`}>Saved sessions</Link>
-  );
+  async function handleSendFollowUp(agentRunId: string, text: string) {
+    if (!session) return;
+    try {
+      await sendPlaygroundFollowUp(session.id, agentRunId, text);
+    } catch (err) {
+      // The AgentPanel's input surfaces its own inline error, but mirror
+      // non-sandbox-released failures into the page-level banner so the user
+      // sees something even if their focus is elsewhere.
+      if (err instanceof PlaygroundFollowUpError && err.kind === "sandbox_released") {
+        throw err;
+      }
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  }
+
+  function handleContinueToScoring() {
+    if (!session) return;
+    void releasePlaygroundSandbox(session.id).catch(() => undefined);
+    setStep("score");
+  }
+
+  const heroActions =
+    step !== "compose" && session ? (
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          className="btn2"
+          onClick={toggleSaved}
+          type="button"
+          title={session.saved ? "Unsave" : "Save session"}
+          aria-label={session.saved ? "Unsave session" : "Save session"}
+          style={{ color: session.saved ? "var(--accent)" : undefined }}
+        >
+          {session.saved ? "★ Saved" : "☆ Save"}
+        </button>
+        <Link className="btn2" href="/playground">
+          ← New playground
+        </Link>
+        <Link className="btn2" href="/playground/saved">
+          Saved sessions
+        </Link>
+      </div>
+    ) : (
+      <Link className="btn2" href="/playground/saved">
+        Saved sessions
+      </Link>
+    );
 
   return (
     <div className="mdl-page playground-page">
       <Hero
         eyebrow="Playground"
         title={
-          step === "compose"
-            ? <>Give models a <em>task</em> to compare.</>
-            : step === "live"
-              ? <>Watch agents <em>build</em> in real time.</>
-              : <>Score the <em>results</em>.</>
+          step === "compose" ? (
+            <>
+              <em>Give models</em> a task to compare.
+            </>
+          ) : step === "live" ? (
+            <>
+              <em>Watch agents</em> build in real time.
+            </>
+          ) : (
+            <>
+              <em>Compare</em> first, score second.
+            </>
+          )
         }
         lede={
           step === "compose"
-            ? "Pick 2-5 models, give them a task, and see how each one builds it from scratch in an isolated sandbox."
+            ? "Pick 2–5 models, write the task, and watch each one build it from scratch in an isolated sandbox."
             : step === "live"
-              ? "Each agent has its own sandbox. Watch them code, run commands, and build your app — token by token."
-              : "Review what each agent built, then score them manually or let AI judge."
+              ? "Each agent runs in its own E2B sandbox on a private git worktree — token by token, tool call by tool call."
+              : "Each tile is a live preview of what the agent built. Score by rubric or hand it off to an autograder."
         }
         actions={heroActions}
       />
@@ -221,166 +330,69 @@ export default function PlaygroundPage() {
       )}
 
       {step === "compose" && (
-        <div className="exp-split">
-          <div style={{ flex: 1 }}>
-            <section className="card2" style={{ marginBottom: 16 }}>
-              <div className="card2-hd">
-                <span className="card2-ti">Task</span>
-              </div>
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder='Create a Python Flask todo web app with SQLite…'
-                style={{
-                  width: "100%",
-                  minHeight: 120,
-                  padding: 12,
-                  fontSize: 14,
-                  borderRadius: 8,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  color: "var(--ink-2)",
-                  resize: "vertical",
-                  fontFamily: "var(--mono)",
-                }}
-                rows={5}
-              />
-              <div style={{ marginTop: 8, fontSize: 12, color: "var(--ink-4)" }}>
-                {prompt.length < 10
-                  ? "Describe the task in detail (at least 10 characters)"
-                  : `${prompt.length} characters`}
-              </div>
-            </section>
-
-            <ModelPicker
-              models={models}
-              selectedModels={selectedModels}
-              onToggle={toggleModel}
-              minSelection={2}
-              maxSelection={5}
-            />
-          </div>
-
-          <aside className="exp-side">
-            <section className="card2">
-              <div className="card2-hd">
-                <span className="card2-ti">Options</span>
-              </div>
-
-              <label className="exp-field">
-                <span>Auto-grader model ID (optional)</span>
-                <input
-                  value={graderModelId}
-                  onChange={(e) => setGraderModelId(e.target.value)}
-                  placeholder="openai/gpt-4o"
-                />
-              </label>
-            </section>
-
-            <section className="card2">
-              <div className="card2-hd">
-                <span className="card2-ti">Preflight</span>
-              </div>
-              <ul className="exp-preflight">
-                <li className={prompt.trim().length >= 10 ? "pf-ok" : "pf-fail"}>
-                  <span className="pip" />
-                  <div className="pf-text">
-                    <strong>Task</strong>
-                    <small>{prompt.trim().length >= 10 ? `${prompt.length} chars` : "Too short"}</small>
-                  </div>
-                </li>
-                <li className={selectedModels.size >= 2 ? "pf-ok" : "pf-fail"}>
-                  <span className="pip" />
-                  <div className="pf-text">
-                    <strong>Models</strong>
-                    <small>{selectedModels.size >= 2 ? `${selectedModels.size} selected` : "Select 2-5"}</small>
-                  </div>
-                </li>
-                <li className={selectedModels.size <= 5 ? "pf-ok" : "pf-fail"}>
-                  <span className="pip" />
-                  <div className="pf-text">
-                    <strong>Max models</strong>
-                    <small>{selectedModels.size <= 5 ? "Within limit" : "Max 5"}</small>
-                  </div>
-                </li>
-              </ul>
-            </section>
-
-            <section className="card2">
-              <div className="card2-hd">
-                <span className="card2-ti">Launch</span>
-              </div>
-              <button
-                className="btn2 primary"
-                disabled={!canLaunch}
-                onClick={handleLaunch}
-                style={{ width: "100%" }}
-                type="button"
-              >
-                Launch playground →
-              </button>
-              <p style={{ fontSize: 11, color: "var(--ink-4)", marginTop: 8, textAlign: "center" }}>
-                Each agent gets its own E2B sandbox
-              </p>
-            </section>
-          </aside>
-        </div>
+        <>
+          {models.length === 0 && (
+            <div className="pg-err-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 16 }}>
+              <NoModelsState onRetry={() => void listModels().then(setModels).catch(() => undefined)} />
+            </div>
+          )}
+          <ComposeStep
+            models={models}
+            prompt={prompt}
+            onPromptChange={setPrompt}
+            selectedModels={selectedModels}
+            onToggleModel={toggleModel}
+            onApplyPreset={applyPreset}
+            onRemoveSelected={removeSelected}
+            graderModelId={graderModelId}
+            onGraderModelIdChange={setGraderModelId}
+            advanced={advanced}
+            onAdvancedChange={setAdvanced}
+            canLaunch={canLaunch}
+            launching={launching}
+            onLaunch={handleLaunch}
+          />
+        </>
       )}
 
       {step === "live" && session && (
         <>
           {allFailed && (
-            <div className="mdl-err" style={{ margin: "16px 0" }}>
-              <h3>All agents failed</h3>
-              <p>None of the agents produced a usable output. You can review the transcripts below or start a new playground.</p>
-            </div>
-          )}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: `repeat(${Math.min(session.agentRuns.length, 3)}, 1fr)`,
-              gap: 16,
-            }}
-          >
-            {session.agentRuns.map((run) => (
-              <AgentPanel
-                key={run.id}
-                agentRun={run}
-                events={sessionEvents.filter((e) => e.agentRunId === run.id)}
+            <div className="pg-err-grid" style={{ gridTemplateColumns: "1fr", marginBottom: 16 }}>
+              <AllAgentsFailedState
+                failures={session.agentRuns.map((r) => ({
+                  modelName: r.modelName,
+                  reason: r.scoreRationale ?? "no output",
+                }))}
+                onRetry={() => setStep("compose")}
               />
-            ))}
-          </div>
-          {allCompleted && !allFailed && (
-            <div style={{ textAlign: "center", marginTop: 16 }}>
-              <button
-                className="btn2 primary"
-                onClick={() => {
-                  // Tell the worker it can tear down the shared sandbox.
-                  if (session) {
-                    void releasePlaygroundSandbox(session.id).catch(() => undefined);
-                  }
-                  setStep("score");
-                }}
-                type="button"
-              >
-                Continue to scoring →
-              </button>
             </div>
           )}
+          <LiveStep
+            session={session}
+            events={sessionEvents}
+            maxWallClockSeconds={advanced.maxWallClockSeconds}
+            allCompleted={allCompleted}
+            allFailed={allFailed}
+            onContinue={handleContinueToScoring}
+            onStopAgent={handleStopAgent}
+            onSendFollowUp={handleSendFollowUp}
+            sandboxReleased={session.status === "completed"}
+          />
         </>
       )}
 
       {step === "score" && session && (
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <ScoringPanel
-            agentRuns={session.agentRuns}
-            sessionId={session.id}
-            graderModelId={session.graderModelId}
-            onScore={handleScore}
-            onAutoGrade={handleAutoGrade}
-            allCompleted={allCompleted}
-          />
-        </div>
+        <ScoreStep
+          session={session}
+          models={models}
+          autograders={autograders}
+          blind={blindScoring}
+          onBlindChange={setBlindScoring}
+          onSubmit={handleScore}
+          onAutoGrade={handleAutoGrade}
+          isGrading={isGrading}
+        />
       )}
     </div>
   );

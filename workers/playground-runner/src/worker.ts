@@ -1,6 +1,8 @@
 import { Worker } from "bullmq";
 import {
   createRedisConnection,
+  PLAYGROUND_CANCEL_RUN_CHANNEL,
+  PLAYGROUND_FOLLOW_UP_CHANNEL,
   PLAYGROUND_QUEUE_NAME,
   PLAYGROUND_RELEASE_CHANNEL,
   PLAYGROUND_RUN_JOB_NAME,
@@ -8,7 +10,7 @@ import {
   type PlaygroundSessionJobData,
   type PlaygroundSessionJobResult,
 } from "@pilab/jobs";
-import { runPlaygroundSession } from "./agent.js";
+import { runPlaygroundSession, type AgentInbox } from "./agent.js";
 
 const redisUrl = readRequiredEnv("REDIS_URL");
 const openRouterApiKey = readRequiredEnv("OPENROUTER_API_KEY");
@@ -32,19 +34,99 @@ const MAX_REVIEW_SECONDS = 30 * 60;
 // Map of sessionId → resolver fn waiting for the release signal.
 const pendingReleases = new Map<string, () => void>();
 
-releaseSubscriber.subscribe(PLAYGROUND_RELEASE_CHANNEL).then(() => {
-  console.log(`[playground-runner] subscribed to ${PLAYGROUND_RELEASE_CHANNEL}`);
-}).catch((err: unknown) => {
-  console.error(`[playground-runner] failed to subscribe to release channel:`, err);
-});
+// Map of sessionId → Map of agentRunId → abort handler.
+const pendingCancellations = new Map<string, Map<string, () => void>>();
 
-releaseSubscriber.on("message", (channel, sessionId) => {
-  if (channel !== PLAYGROUND_RELEASE_CHANNEL) return;
-  const resolver = pendingReleases.get(sessionId);
-  if (resolver) {
-    console.log(`[playground-runner] release signal received for ${sessionId.slice(0, 8)}`);
-    pendingReleases.delete(sessionId);
-    resolver();
+// Map of sessionId → Map of agentRunId → inbox appender. Populated while a
+// playground session is in-flight; lets external follow-up pub/sub messages
+// land in the right agent's sandbox file.
+const pendingInboxes = new Map<string, Map<string, AgentInbox>>();
+
+function registerAgentSignal(sessionId: string, agentRunId: string, abort: () => void): () => void {
+  let bucket = pendingCancellations.get(sessionId);
+  if (!bucket) {
+    bucket = new Map();
+    pendingCancellations.set(sessionId, bucket);
+  }
+  bucket.set(agentRunId, abort);
+  return () => {
+    const b = pendingCancellations.get(sessionId);
+    b?.delete(agentRunId);
+    if (b && b.size === 0) pendingCancellations.delete(sessionId);
+  };
+}
+
+function registerFollowUpInbox(sessionId: string, agentRunId: string, inbox: AgentInbox): () => void {
+  let bucket = pendingInboxes.get(sessionId);
+  if (!bucket) {
+    bucket = new Map();
+    pendingInboxes.set(sessionId, bucket);
+  }
+  bucket.set(agentRunId, inbox);
+  return () => {
+    const b = pendingInboxes.get(sessionId);
+    b?.delete(agentRunId);
+    if (b && b.size === 0) pendingInboxes.delete(sessionId);
+  };
+}
+
+releaseSubscriber
+  .subscribe(PLAYGROUND_RELEASE_CHANNEL, PLAYGROUND_CANCEL_RUN_CHANNEL, PLAYGROUND_FOLLOW_UP_CHANNEL)
+  .then(() => {
+    console.log(
+      `[playground-runner] subscribed to ${PLAYGROUND_RELEASE_CHANNEL}, ${PLAYGROUND_CANCEL_RUN_CHANNEL}, ${PLAYGROUND_FOLLOW_UP_CHANNEL}`,
+    );
+  })
+  .catch((err: unknown) => {
+    console.error(`[playground-runner] failed to subscribe:`, err);
+  });
+
+releaseSubscriber.on("message", (channel, payload) => {
+  if (channel === PLAYGROUND_RELEASE_CHANNEL) {
+    const sessionId = payload;
+    const resolver = pendingReleases.get(sessionId);
+    if (resolver) {
+      console.log(`[playground-runner] release signal received for ${sessionId.slice(0, 8)}`);
+      pendingReleases.delete(sessionId);
+      resolver();
+    }
+    return;
+  }
+  if (channel === PLAYGROUND_CANCEL_RUN_CHANNEL) {
+    const [sessionId, agentRunId] = payload.split(":");
+    if (!sessionId || !agentRunId) return;
+    const abort = pendingCancellations.get(sessionId)?.get(agentRunId);
+    if (abort) {
+      console.log(
+        `[playground-runner] cancel-run signal received for ${sessionId.slice(0, 8)} agent ${agentRunId.slice(0, 8)}`,
+      );
+      abort();
+    }
+    return;
+  }
+  if (channel === PLAYGROUND_FOLLOW_UP_CHANNEL) {
+    const [sessionId, agentRunId, encoded] = payload.split(":");
+    if (!sessionId || !agentRunId || !encoded) return;
+    const inbox = pendingInboxes.get(sessionId)?.get(agentRunId);
+    if (!inbox) {
+      console.warn(
+        `[playground-runner] follow-up arrived for unknown agent ${sessionId.slice(0, 8)}/${agentRunId.slice(0, 8)} — ignored`,
+      );
+      return;
+    }
+    let text: string;
+    try {
+      text = Buffer.from(encoded, "base64").toString("utf8");
+    } catch (err) {
+      console.error(`[playground-runner] follow-up payload decode failed for ${sessionId.slice(0, 8)}:`, err);
+      return;
+    }
+    console.log(
+      `[playground-runner] follow-up received for ${sessionId.slice(0, 8)} agent ${agentRunId.slice(0, 8)} (${text.length} chars)`,
+    );
+    void inbox.appendFollowUp(text).catch((err: unknown) => {
+      console.error(`[playground-runner] follow-up append failed:`, err);
+    });
   }
 });
 
@@ -71,9 +153,23 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
       throw new Error(`Unknown job name: ${job.name}`);
     }
 
-    const { sessionId, prompt, agentRuns, maxWallClockSeconds } = job.data;
+    const {
+      sessionId,
+      prompt,
+      agentRuns,
+      maxWallClockSeconds,
+      tools,
+      seedPromptText,
+      sandboxImage,
+      runTwiceAndAverage,
+    } = job.data;
 
     await job.updateProgress(createPlaygroundProgress("preparing-sandbox", "Creating shared sandbox + git worktrees"));
+
+    if (runTwiceAndAverage) {
+      // Wired through but not yet doubling the run set — PR-2 adds the averaging path.
+      console.log(`[playground-runner] session ${sessionId.slice(0, 8)} requested runTwiceAndAverage; persisted on the session but not yet doubled.`);
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), (maxWallClockSeconds ?? MAX_WALL_CLOCK_SECONDS) * 1000);
@@ -89,6 +185,13 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
         maxReviewSeconds: MAX_REVIEW_SECONDS,
         signal: controller.signal,
         waitForRelease,
+        registerAgentSignal: (agentRunId, abort) =>
+          registerAgentSignal(sessionId, agentRunId, abort),
+        registerFollowUpInbox: (agentRunId, inbox) =>
+          registerFollowUpInbox(sessionId, agentRunId, inbox),
+        ...(tools ? { tools } : {}),
+        ...(seedPromptText ? { seedPromptText } : {}),
+        ...(sandboxImage ? { sandboxImage } : {}),
       });
 
       return {
@@ -98,6 +201,8 @@ const worker = new Worker<PlaygroundSessionJobData, PlaygroundSessionJobResult>(
       };
     } finally {
       clearTimeout(timeout);
+      pendingCancellations.delete(sessionId);
+      pendingInboxes.delete(sessionId);
     }
   },
   {

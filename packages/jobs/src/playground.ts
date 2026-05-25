@@ -11,9 +11,44 @@ export const PLAYGROUND_RUN_JOB_NAME = "playground.run-session";
  */
 export const PLAYGROUND_RELEASE_CHANNEL = "pilab.playground.release";
 
+/**
+ * Redis pub/sub channel used to cancel a specific agent run mid-flight.
+ * Payload format: `${sessionId}:${agentRunId}`. Worker aborts the matching
+ * agent's controller; the run is marked failed with cancellation_reason set.
+ */
+export const PLAYGROUND_CANCEL_RUN_CHANNEL = "pilab.playground.cancel-run";
+
+/**
+ * Redis pub/sub channel used to send a follow-up turn to a specific agent run.
+ * Payload format: `${sessionId}:${agentRunId}:${base64(text)}`. The worker
+ * appends the decoded text as a JSON line to the agent's inbox file, which the
+ * long-running Pi script tails.
+ */
+export const PLAYGROUND_FOLLOW_UP_CHANNEL = "pilab.playground.follow-up";
+
 export async function publishPlaygroundRelease(connection: Redis, sessionId: string): Promise<void> {
   await connection.publish(PLAYGROUND_RELEASE_CHANNEL, sessionId);
 }
+
+export async function publishPlaygroundCancelRun(
+  connection: Redis,
+  sessionId: string,
+  agentRunId: string,
+): Promise<void> {
+  await connection.publish(PLAYGROUND_CANCEL_RUN_CHANNEL, `${sessionId}:${agentRunId}`);
+}
+
+export async function publishPlaygroundFollowUp(
+  connection: Redis,
+  sessionId: string,
+  agentRunId: string,
+  text: string,
+): Promise<void> {
+  const encoded = Buffer.from(text, "utf8").toString("base64");
+  await connection.publish(PLAYGROUND_FOLLOW_UP_CHANNEL, `${sessionId}:${agentRunId}:${encoded}`);
+}
+
+export type PlaygroundSandboxImage = "py" | "node" | "py-node" | "custom";
 
 export interface PlaygroundSessionJobData {
   sessionId: string;
@@ -24,6 +59,11 @@ export interface PlaygroundSessionJobData {
     modelName: string;
   }>;
   maxWallClockSeconds: number;
+  maxOutputTokensPerAgent?: number;
+  tools?: string[];
+  sandboxImage?: PlaygroundSandboxImage;
+  seedPromptText?: string;
+  runTwiceAndAverage?: boolean;
 }
 
 export interface PlaygroundSessionJobResult {

@@ -64,6 +64,34 @@
       "when": 1779600000000,
       "tag": "0008_playground_session_saved",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1779700000000,
+      "tag": "0009_playground_advanced_options",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1779800000000,
+      "tag": "0010_playground_rubric",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1779900000000,
+      "tag": "0011_playground_tags_and_leaderboard",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1780000000000,
+      "tag": "0012_playground_follow_ups",
+      "breakpoints": true
     }
   ]
 }
