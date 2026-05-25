@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 import { StatusPill } from "../ui";
 import { AttemptHistoryList } from "./AttemptHistoryList";
 import type { CaseBuildActions, CaseBuildSnapshot, WorkflowNodeId } from "./types";
@@ -51,11 +51,8 @@ function renderBody(id: WorkflowNodeId, state: Props["state"]) {
 }
 
 function ImportBody({ state }: Props) {
-  const [url, setUrl] = useState("");
-  const onSubmit = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    void state.importIssue(url);
-  };
+  const [issueUrl, setIssueUrl] = useState("");
+  const [prUrl, setPrUrl] = useState("");
   if (state.importResult) {
     const issue = state.importResult.issue;
     return (
@@ -104,24 +101,44 @@ function ImportBody({ state }: Props) {
           </>
         ) : null}
         {!state.selectedPrResult ? (
-          <form onSubmit={(e) => { e.preventDefault(); void state.selectPr(url); }} className="wf-form">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void state.selectPr(prUrl);
+            }}
+            className="wf-form"
+          >
             <label htmlFor="wf-pr-input">PR URL or number</label>
-            <input id="wf-pr-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://github.com/owner/repo/pull/123 or 123" />
+            <input
+              id="wf-pr-input"
+              value={prUrl}
+              onChange={(e) => setPrUrl(e.target.value)}
+              placeholder="https://github.com/owner/repo/pull/123 or 123"
+            />
             <button type="submit" className="btn2 primary" disabled={state.isSelectingPr}>
               {state.isSelectingPr ? "Selecting…" : "Select PR"}
             </button>
+            <p className="wf-form-help">
+              You can paste the full URL (including the <code>/files</code> or <code>/changes</code> tab) — the wizard will normalize it.
+            </p>
           </form>
         ) : null}
       </div>
     );
   }
   return (
-    <form onSubmit={onSubmit} className="wf-form">
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        void state.importIssue(issueUrl);
+      }}
+      className="wf-form"
+    >
       <label htmlFor="wf-issue-url">GitHub issue URL</label>
       <input
         id="wf-issue-url"
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
+        value={issueUrl}
+        onChange={(e) => setIssueUrl(e.target.value)}
         placeholder="https://github.com/owner/repo/issues/123"
         required
       />

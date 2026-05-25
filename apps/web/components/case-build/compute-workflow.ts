@@ -72,6 +72,8 @@ function pickActive(nodes: WorkflowNode[]): WorkflowNodeId {
 // ── Per-node computers ──────────────────────────────────────────────
 
 function computeImport(input: ComputeWorkflowInput): WorkflowNode {
+  // "Import" covers the whole Import+SelectPR phase. It is not done until a
+  // PR has been chosen for the imported issue.
   const node: WorkflowNode = { id: "import", label: "Import issue", status: "pending" };
   if (input.importError) {
     node.status = "failed";
@@ -83,8 +85,29 @@ function computeImport(input: ComputeWorkflowInput): WorkflowNode {
     node.currentStage = { tag: "importing", message: "Fetching issue + discovering PR candidates" };
     return node;
   }
-  if (input.selectedPrResult || input.importResult) {
+  if (input.isSelectingPr) {
+    node.status = "running";
+    node.currentStage = { tag: "selecting-pr", message: "Selecting pull request" };
+    return node;
+  }
+  if (input.prSelectionError) {
+    node.status = "failed";
+    node.errorMessage = input.prSelectionError;
+    return node;
+  }
+  if (input.selectedPrResult) {
     node.status = "done";
+    return node;
+  }
+  if (input.importResult) {
+    // Issue imported but no PR chosen yet — user needs to pick one.
+    node.status = "running";
+    node.currentStage = {
+      tag: "select-pr",
+      message: input.importResult.prCandidates.length > 0
+        ? `Pick the fixing PR (${input.importResult.prCandidates.length} candidate${input.importResult.prCandidates.length === 1 ? "" : "s"} discovered)`
+        : "Paste the PR URL or number",
+    };
   }
   return node;
 }
@@ -92,17 +115,6 @@ function computeImport(input: ComputeWorkflowInput): WorkflowNode {
 function computeBuildTests(input: ComputeWorkflowInput, importStatus: NodeStatus): WorkflowNode {
   const node: WorkflowNode = { id: "buildTests", label: "Build tests", status: "pending" };
   if (importStatus !== "done") return node;
-
-  if (input.prSelectionError) {
-    node.status = "failed";
-    node.errorMessage = input.prSelectionError;
-    return node;
-  }
-  if (input.isSelectingPr) {
-    node.status = "running";
-    node.currentStage = { tag: "selecting-pr", message: "Selecting pull request" };
-    return node;
-  }
 
   const job = input.caseBuilderJob;
   if (!job) return node;

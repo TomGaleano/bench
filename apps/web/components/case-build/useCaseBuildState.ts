@@ -186,8 +186,8 @@ export function useCaseBuildState(): CaseBuildSnapshot & CaseBuildActions {
         setPrSelectionError("Import an issue before selecting a PR.");
         return;
       }
-      const trimmed = input.trim();
-      if (!trimmed) {
+      const normalized = normalizePrInput(input);
+      if (!normalized) {
         setPrSelectionError("Enter a pull request URL or number.");
         return;
       }
@@ -195,7 +195,7 @@ export function useCaseBuildState(): CaseBuildSnapshot & CaseBuildActions {
       setValidationError(undefined);
       setIsSelectingPr(true);
       try {
-        const prResult = await selectPullRequest(caseId, trimmed);
+        const prResult = await selectPullRequest(caseId, normalized);
         setSelectedPrResult(prResult);
         setImportResult((c) => (c ? { ...c, case: prResult.case, needsPrSelection: false } : c));
       } catch (err) {
@@ -392,15 +392,46 @@ function truncate(s: string, max: number): string {
 }
 
 function parseGitHubIssueUrl(value: string): { issueUrl: string } | null {
+  // Accept inputs without `https://`, and with the optional `/changes` etc. tab suffix.
+  const candidate = withScheme(value.trim());
   try {
-    const url = new URL(value);
+    const url = new URL(candidate);
     const segments = url.pathname.split("/").filter(Boolean);
     const [owner, repo, type, num] = segments;
     if (url.hostname !== "github.com" || !owner || !repo || type !== "issues" || !num) return null;
-    return { issueUrl: url.toString() };
+    return { issueUrl: `https://github.com/${owner}/${repo}/issues/${num}` };
   } catch {
     return null;
   }
+}
+
+/** Accepts a PR URL with or without the `https://` scheme, and strips GitHub UI tab suffixes
+ *  like `/files`, `/commits`, `/changes`, `/checks`. Also accepts a bare PR number. */
+function normalizePrInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  const withProto = withScheme(trimmed);
+  try {
+    const url = new URL(withProto);
+    if (url.hostname !== "github.com") return withProto;
+    const segments = url.pathname.split("/").filter(Boolean);
+    const pullIdx = segments.indexOf("pull");
+    if (pullIdx >= 2 && segments[pullIdx + 1]) {
+      const owner = segments[0];
+      const repo = segments[1];
+      const num = segments[pullIdx + 1];
+      return `https://github.com/${owner}/${repo}/pull/${num}`;
+    }
+    return withProto;
+  } catch {
+    return withProto;
+  }
+}
+
+function withScheme(value: string): string {
+  if (/^https?:\/\//i.test(value)) return value;
+  return `https://${value}`;
 }
 
 function isTerminalJobState(state: string): boolean {
