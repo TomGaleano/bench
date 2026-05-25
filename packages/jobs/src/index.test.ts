@@ -3,8 +3,6 @@ import { describe, it } from "node:test";
 import {
   createCaseBuilderPrepareJobId,
   createCaseBuilderProgress,
-  createPiRunnerPlanJobId,
-  createPiRunnerProgress,
   createValidationRunnerJobId,
   createValidationRunnerProgress,
 } from "./index.js";
@@ -26,23 +24,6 @@ describe("case-builder job helpers", () => {
     assert.equal(progress.stage, "validating-artifacts");
     assert.equal(progress.message, "Checking artifacts");
     assert.ok(Date.parse(progress.at));
-  });
-});
-
-describe("pi-runner job helpers", () => {
-  it("creates stable plan job ids", () => {
-    assert.equal(
-      createPiRunnerPlanJobId("5b73fd14-80db-4532-b322-4476909ca050"),
-      "pi-runner-plan-5b73fd14-80db-4532-b322-4476909ca050",
-    );
-  });
-
-  it("creates timestamped pi-runner progress payloads", () => {
-    const progress = createPiRunnerProgress("running-pi", "Running Pi plan session");
-
-    assert.equal(progress.stage, "running-pi");
-    assert.equal(progress.message, "Running Pi plan session");
-    assert.match(progress.at, /^\d{4}-\d{2}-\d{2}T/);
   });
 });
 

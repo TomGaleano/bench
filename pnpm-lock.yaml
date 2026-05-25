@@ -47,6 +47,9 @@ importers:
       '@pilab/object-store':
         specifier: workspace:*
         version: link:../../packages/object-store
+      '@pilab/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       drizzle-orm:
         specifier: ^0.45.1
         version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
@@ -224,6 +227,9 @@ importers:
       '@pilab/object-store':
         specifier: workspace:*
         version: link:../../packages/object-store
+      '@pilab/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
@@ -246,6 +252,9 @@ importers:
 
   workers/grader:
     dependencies:
+      '@mariozechner/pi-coding-agent':
+        specifier: ^0.73.0
+        version: 0.73.0(ws@8.20.0)(zod@4.4.1)
       '@pilab/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -255,6 +264,9 @@ importers:
       '@pilab/object-store':
         specifier: workspace:*
         version: link:../../packages/object-store
+      '@pilab/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       bullmq:
         specifier: ^5.65.0
         version: 5.76.4
@@ -302,37 +314,6 @@ importers:
       bullmq:
         specifier: ^5.65.0
         version: 5.76.4
-    devDependencies:
-      '@types/node':
-        specifier: ^24.10.0
-        version: 24.12.2
-      tsx:
-        specifier: ^4.20.6
-        version: 4.21.0
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
-  workers/reproduction-validator:
-    dependencies:
-      '@mariozechner/pi-coding-agent':
-        specifier: ^0.73.0
-        version: 0.73.0(ws@8.20.0)(zod@4.4.1)
-      '@pilab/db':
-        specifier: workspace:*
-        version: link:../../packages/db
-      '@pilab/jobs':
-        specifier: workspace:*
-        version: link:../../packages/jobs
-      '@pilab/object-store':
-        specifier: workspace:*
-        version: link:../../packages/object-store
-      '@pilab/runtime':
-        specifier: workspace:*
-        version: link:../../packages/runtime
-      drizzle-orm:
-        specifier: ^0.45.2
-        version: 0.45.2(@opentelemetry/api@1.9.1)(postgres@3.4.9)
     devDependencies:
       '@types/node':
         specifier: ^24.10.0

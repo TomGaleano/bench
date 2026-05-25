@@ -817,13 +817,13 @@ export default function NewCasePage() {
     [caseVersionDetail?.validationAttempts],
   );
   const latestValidationAttempt = validationAttempts.at(-1) ?? null;
-  const reproductionStepRuns = caseVersionDetail?.reproductionSteps ?? [];
+  const evaluatorStrategy = caseVersionDetail?.evaluatorStrategy ?? null;
   const latestValidationStatus = validationRunnerOutput?.status ?? latestValidationAttempt?.status ?? null;
   const validationComplete = Boolean(
     (validationRunnerOutput && isTerminalJobState(validationRunnerJob?.state ?? "")) ||
     (latestValidationAttempt &&
-      ["accepted", "rejected", "error"].includes(latestValidationAttempt.status) &&
-      (latestValidationAttempt.strategy === "reproduction_steps" || latestValidationAttempt.status === "accepted" || latestValidationAttempt.status === "error")),
+      ["accepted", "rejected", "error"].includes(latestValidationAttempt.status)) ||
+    evaluatorStrategy !== null,
   );
 
   const activeStepIndex = useMemo(() => {
@@ -1242,15 +1242,22 @@ export default function NewCasePage() {
 
               {validationAttempts.length ? (
                 <div className="tableWrap">
+                  <div className="wz-callout" style={{ marginBottom: "0.5rem" }}>
+                    <strong>Test-generation attempt {latestValidationAttempt?.attemptNumber ?? 1} of 3</strong>
+                    {evaluatorStrategy === "llm_evaluator_only"
+                      ? " — exhausted; case will use the LLM evaluator at benchmark time."
+                      : evaluatorStrategy === "deterministic_tests"
+                        ? " — validated; tests will score solutions deterministically."
+                        : null}
+                  </div>
                   <table>
                     <thead>
-                      <tr><th>Attempt</th><th>Strategy</th><th>Status</th><th>Accepted</th><th>Rejected</th><th>Runner</th></tr>
+                      <tr><th>Attempt</th><th>Status</th><th>Accepted</th><th>Rejected</th><th>Runner</th></tr>
                     </thead>
                     <tbody>
                       {validationAttempts.map((attempt) => (
                         <tr key={attempt.id}>
                           <td>{attempt.attemptNumber}</td>
-                          <td><code>{attempt.strategy}</code></td>
                           <td><StatusPill status={attempt.status} /></td>
                           <td>{attempt.acceptedTestCount}</td>
                           <td>{attempt.rejectedTestCount}</td>
@@ -1262,29 +1269,20 @@ export default function NewCasePage() {
                 </div>
               ) : null}
 
-              {reproductionStepRuns.length ? (
+              {evaluatorStrategy === "llm_evaluator_only" ? (
                 <div className="wz-swe-entry">
                   <div className="callout">
-                    <StatusPill status="reproduction steps" /> Behavioral fallback generated after unit-test validation retries.
+                    <StatusPill status="llm evaluator only" /> Deterministic test generation exhausted its attempts.
+                    At benchmark time, a Pi-evaluator agent will score each agent's solution against the gold patch.
                   </div>
-                  {reproductionStepRuns.map((run) => (
-                    <div key={run.id} className="wz-rejected-test">
-                      <div className="wz-kv-compact">
-                        <span>Status: <StatusPill status={run.status} /></span>
-                        <span>Base reproduced: <strong>{run.reproducedOnBase === null ? "pending" : run.reproducedOnBase ? "yes" : "no"}</strong></span>
-                        <span>Gold fixed: <strong>{run.fixedOnGold === null ? "pending" : run.fixedOnGold ? "yes" : "no"}</strong></span>
-                      </div>
-                      {run.rationale ? <p>{run.rationale}</p> : null}
-                      <ol>
-                        {run.steps.map((step, index) => (
-                          <li key={`${run.id}-${index}`}>
-                            <strong>{step.description}</strong><br />
-                            <code>{step.command}</code>
-                          </li>
-                        ))}
-                      </ol>
-                    </div>
-                  ))}
+                </div>
+              ) : null}
+              {evaluatorStrategy === "deterministic_tests" ? (
+                <div className="wz-swe-entry">
+                  <div className="callout">
+                    <StatusPill status="deterministic tests" /> Validated fail-to-pass / pass-to-pass tests will score
+                    each agent's solution at benchmark time.
+                  </div>
                 </div>
               ) : null}
 

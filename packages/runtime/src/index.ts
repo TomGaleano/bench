@@ -260,3 +260,37 @@ function delay(ms: number): Promise<void> {
 }
 
 export { runSandboxPiAgent, createSandboxEventParser } from "./sandbox-agent.js";
+export {
+  bootstrapSharedRepo,
+  bootstrapRepoAtCommit,
+  addWorktree,
+  writeSeedFile,
+  readJsonFromSandbox,
+} from "./worktrees.js";
+export {
+  buildPeerSystemPrompt,
+  type PeerPromptInput,
+  type PeerPromptRole,
+} from "./peer-prompt.js";
+export {
+  createEventStream,
+  type AgentEventKind,
+  type AppendEventBody,
+  type RunUpdateBody,
+  type EventStream,
+  type EventStreamConfig,
+} from "./event-stream.js";
+export { createFollowUpInbox, type AgentInbox } from "./follow-up-inbox.js";
+export {
+  mapPiSdkEvent,
+  isTurnCompleteEvent,
+  type MappedEvent,
+  type TurnCompleteEvent,
+} from "./event-mapper.js";
+export {
+  runPiJsonGrader,
+  GRADER_SANDBOX_ROOT,
+  GRADER_OUTPUT_FILENAME,
+  type GraderContextFile,
+  type RunPiJsonGraderInput,
+} from "./pi-json-grader.js";

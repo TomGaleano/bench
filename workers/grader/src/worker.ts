@@ -1,7 +1,18 @@
 import { Worker } from "bullmq";
 import { eq } from "drizzle-orm";
 
-import { createDb, artifacts, caseVersions, evaluations, githubIssues, graderVerdicts, patches, planScores, plans, runs } from "@pilab/db";
+import {
+  createDb,
+  artifacts,
+  caseVersions,
+  evaluations,
+  githubIssues,
+  graderVerdicts,
+  patches,
+  planScores,
+  plans,
+  runs,
+} from "@pilab/db";
 import type { DbClient } from "@pilab/db";
 import {
   GRADING_EXTERNAL_QUEUE_NAME,
@@ -17,14 +28,19 @@ import {
 } from "@pilab/jobs";
 import { createObjectStore, type JsonValue } from "@pilab/object-store";
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
+import {
+  GRADER_OUTPUT_FILENAME,
+  GRADER_SANDBOX_ROOT,
+  runPiJsonGrader,
+} from "@pilab/runtime";
+
+// ── Configuration ──────────────────────────────────────────────────────────
 
 const databaseUrl = readRequiredEnv("DATABASE_URL");
 const redisUrl = readRequiredEnv("REDIS_URL");
 const openRouterApiKey = readRequiredEnv("OPENROUTER_API_KEY");
-const defaultJudgeModelId = "openai/gpt-5.4-mini";
+const defaultJudgeModelId =
+  process.env.GRADER_MODEL_ID ?? "anthropic/claude-haiku-4-5";
 
 const db = createDb(databaseUrl);
 const connection = createRedisConnection(redisUrl, { maxRetriesPerRequest: null });
@@ -37,199 +53,7 @@ const objectStore = createObjectStore({
   forcePathStyle: true,
 });
 
-// ---------------------------------------------------------------------------
-// OpenRouter structured-output caller
-// ---------------------------------------------------------------------------
-
-type OpenRouterCallConfig = {
-  apiKey: string;
-  modelId: string;
-  fetchImpl?: typeof fetch;
-};
-
-type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-
-type OpenRouterChatResponse = {
-  id?: string;
-  model?: string;
-  choices?: Array<{
-    message?: {
-      content?: string | null;
-    };
-  }>;
-  usage?: JsonValue;
-  error?: {
-    message?: string;
-  };
-};
-
-const planScoreSchema = {
-  type: "object",
-  properties: {
-    overallScore: { type: "number" },
-    correctnessScore: { type: "number" },
-    completenessScore: { type: "number" },
-    safetyScore: { type: "number" },
-    rationale: { type: "string" },
-  },
-  required: [
-    "overallScore",
-    "correctnessScore",
-    "completenessScore",
-    "safetyScore",
-    "rationale",
-  ],
-  additionalProperties: false,
-} as const;
-
-const implementationScoreSchema = {
-  type: "object",
-  properties: {
-    overallScore: { type: "number" },
-    diffSimilarityScore: { type: "number" },
-    rationale: { type: "string" },
-  },
-  required: ["overallScore", "diffSimilarityScore", "rationale"],
-  additionalProperties: false,
-} as const;
-
-const externalVerdictSchema = {
-  type: "object",
-  properties: {
-    winner: { type: "string", enum: ["A", "B", "tie"] },
-    rationale: { type: "string" },
-  },
-  required: ["winner", "rationale"],
-  additionalProperties: false,
-} as const;
-
-async function callOpenRouterStructured<T>(
-  config: OpenRouterCallConfig,
-  schema: object,
-  schemaName: string,
-  messages: ChatMessage[],
-  validator: (value: unknown) => value is T,
-): Promise<{ result: T; rawContent: string }> {
-  const fetchFn = config.fetchImpl ?? fetch;
-  const maxAttempts = 2;
-  let lastError: Error | undefined;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const effectiveMessages =
-      attempt === 1
-        ? messages
-        : [
-            ...messages,
-            {
-              role: "user" as const,
-              content: [
-                "Previous attempt did not return valid JSON matching the required schema.",
-                "Return ONLY a valid JSON object with all required fields.",
-                `Previous error: ${lastError?.message ?? "unknown"}`,
-              ].join(" "),
-            },
-          ];
-
-    const response = await fetchFn(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          "Content-Type": "application/json",
-          "X-OpenRouter-Title": "Pi Lab Grader",
-        },
-        body: JSON.stringify({
-          model: config.modelId,
-          messages: effectiveMessages,
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: schemaName,
-              strict: true,
-              schema,
-            },
-          },
-          temperature: 0,
-          max_tokens: attempt === 1 ? 3200 : 2200,
-        }),
-      },
-    );
-
-    const raw = (await response.json()) as OpenRouterChatResponse;
-
-    if (!response.ok) {
-      throw new Error(
-        `OpenRouter grader failed with HTTP ${response.status}: ${
-          raw.error?.message ?? "unknown error"
-        }`,
-      );
-    }
-
-    const content = raw.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("OpenRouter grader returned no message content");
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      // Try extracting JSON from markdown fences
-      const extracted = extractJsonFromContent(content);
-      if (extracted !== undefined) {
-        try {
-          parsed = JSON.parse(extracted);
-        } catch {
-          // fall through to error
-        }
-      }
-
-      if (parsed === undefined) {
-        lastError = new Error(
-          `OpenRouter grader returned malformed JSON: ${
-            content.length > 200 ? `${content.slice(0, 200)}...` : content
-          }`,
-        );
-        if (attempt < maxAttempts) continue;
-        throw lastError;
-      }
-    }
-
-    if (!validator(parsed)) {
-      lastError = new Error(
-        "OpenRouter grader returned JSON that does not match the expected schema",
-      );
-      if (attempt < maxAttempts) continue;
-      throw lastError;
-    }
-
-    return { result: parsed, rawContent: content };
-  }
-
-  throw lastError ?? new Error("OpenRouter structured call failed");
-}
-
-function extractJsonFromContent(content: string): string | undefined {
-  // Try JSON code fence
-  const fenceMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenceMatch?.[1]) {
-    const inner = fenceMatch[1].trim();
-    if (inner.startsWith("{")) return inner;
-  }
-
-  // Try to find a JSON object anywhere
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    return jsonMatch[0];
-  }
-
-  return undefined;
-}
-
-// ---------------------------------------------------------------------------
-// Scoring helpers
-// ---------------------------------------------------------------------------
+// ── Scoring helpers ────────────────────────────────────────────────────────
 
 function computeJaccardSimilarity(a: string, b: string): number {
   const extractLines = (diff: string): string[] =>
@@ -257,9 +81,21 @@ function clampScore(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-// ---------------------------------------------------------------------------
-// Plan grading processor
-// ---------------------------------------------------------------------------
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readNumber(value: Record<string, unknown>, key: string): number | null {
+  const inner = value[key];
+  return typeof inner === "number" && Number.isFinite(inner) ? inner : null;
+}
+
+function readString(value: Record<string, unknown>, key: string): string {
+  const inner = value[key];
+  return typeof inner === "string" ? inner : "";
+}
+
+// ── Plan grading ───────────────────────────────────────────────────────────
 
 type PlanScoreParsed = {
   overallScore: number;
@@ -269,14 +105,29 @@ type PlanScoreParsed = {
   rationale: string;
 };
 
-function isValidPlanScore(value: unknown): value is PlanScoreParsed {
-  if (!isRecord(value)) return false;
-  if (typeof value.overallScore !== "number") return false;
-  if (typeof value.correctnessScore !== "number") return false;
-  if (typeof value.completenessScore !== "number") return false;
-  if (typeof value.safetyScore !== "number") return false;
-  if (typeof value.rationale !== "string") return false;
-  return true;
+function parsePlanScore(value: unknown): PlanScoreParsed {
+  if (!isRecord(value)) {
+    throw new Error("Plan grader output must be a JSON object");
+  }
+  const overallScore = readNumber(value, "overallScore");
+  const correctnessScore = readNumber(value, "correctnessScore");
+  const completenessScore = readNumber(value, "completenessScore");
+  const safetyScore = readNumber(value, "safetyScore");
+  if (
+    overallScore == null ||
+    correctnessScore == null ||
+    completenessScore == null ||
+    safetyScore == null
+  ) {
+    throw new Error("Plan grader output missing numeric score fields");
+  }
+  return {
+    overallScore,
+    correctnessScore,
+    completenessScore,
+    safetyScore,
+    rationale: readString(value, "rationale"),
+  };
 }
 
 async function gradePlan(
@@ -288,7 +139,6 @@ async function gradePlan(
 
   console.log(`[grader] grading plan ${planId} for run ${runId}`);
 
-  // 1. Load the plan
   const plan = await db.query.plans.findFirst({
     where: eq(plans.id, planId),
   });
@@ -296,43 +146,11 @@ async function gradePlan(
     throw new Error(`Plan not found: ${planId}`);
   }
 
-  // 2. Load the plan artifact from object store
-  const planArtifact = plan.rawArtifactId
-    ? await db.query.artifacts.findFirst({
-        where: eq(artifacts.id, plan.rawArtifactId),
-      })
-    : undefined;
-
-  let planContent = "";
-  if (planArtifact) {
-    try {
-      const planJson = await objectStore.getJsonArtifact<JsonValue>(
-        planArtifact.objectKey,
-      );
-      planContent = isRecord(planJson) &&
-        typeof planJson.planMarkdown === "string"
-        ? planJson.planMarkdown
-        : typeof planJson === "string"
-          ? planJson
-          : JSON.stringify(planJson, null, 2);
-    } catch (error) {
-      console.warn(
-        `[grader] could not load plan artifact ${planArtifact.objectKey}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      // Fall back to stored plan fields
-      planContent = plan.planMarkdown ?? JSON.stringify(plan.planJson);
-    }
-  } else {
-    planContent = plan.planMarkdown ?? JSON.stringify(plan.planJson);
-  }
-
+  const planContent = await loadPlanContent(plan);
   if (!planContent || planContent.trim().length === 0) {
     throw new Error(`Plan ${planId} has no readable content`);
   }
 
-  // 3. Load the case version and associated issue
   const caseVersion = await db.query.caseVersions.findFirst({
     where: eq(caseVersions.id, caseVersionId),
   });
@@ -340,108 +158,57 @@ async function gradePlan(
     throw new Error(`Case version not found: ${caseVersionId}`);
   }
 
-  let issueTitle = "";
-  let issueBody = "";
-  if (caseVersion.githubIssueId) {
-    const issue = await db.query.githubIssues.findFirst({
-      where: eq(githubIssues.id, caseVersion.githubIssueId),
-    });
-    if (issue) {
-      issueTitle = issue.title ?? "";
-      issueBody = issue.body ?? "";
-    }
-  }
-
-  // 4. Load the gold patch artifact
-  let goldPatchContent = "";
-  if (caseVersion.goldPatchArtifactId) {
-    const goldArtifact = await db.query.artifacts.findFirst({
-      where: eq(artifacts.id, caseVersion.goldPatchArtifactId),
-    });
-    if (goldArtifact) {
-      goldPatchContent = await objectStore.getArtifactText(
-        goldArtifact.objectKey,
-      );
-    }
-  }
-
+  const { issueTitle, issueBody } = await loadIssue(db, caseVersion.githubIssueId);
+  const goldPatchContent = await loadGoldPatch(caseVersion.goldPatchArtifactId);
   if (!goldPatchContent || goldPatchContent.trim().length === 0) {
-    throw new Error(
-      `Gold patch not found for case version ${caseVersionId}`,
-    );
+    throw new Error(`Gold patch not found for case version ${caseVersionId}`);
   }
 
-  // 5. Call OpenRouter with issue-aware prompt
-  const { result: scores } = await callOpenRouterStructured<PlanScoreParsed>(
-    { apiKey: openRouterApiKey, modelId: judgeModelId },
-    planScoreSchema,
-    "pilab_plan_score",
-    [
-      {
-        role: "system",
-        content: [
-          "You are an expert code reviewer evaluating an AI agent's implementation plan.",
-          "",
-          "The agent was given a GitHub issue and asked to produce a plan for fixing it.",
-          "Your job is to evaluate whether the plan correctly diagnoses the problem and proposes a viable fix.",
-          "",
-          "IMPORTANT: The plan is written in natural language, not code. Do NOT penalize the plan for not matching the gold patch word-for-word. What matters is whether the plan correctly identifies the root cause and proposes a fix that would resolve the issue.",
-          "",
-          "Score the plan on:",
-          "- Correctness (1-10): Did the agent correctly diagnose the root cause described in the issue? Did it identify the right files and functions to modify?",
-          "- Completeness (1-10): Does the plan cover all necessary changes to fix the issue? Does it mention test updates, edge cases, or related files that need changing?",
-          "- Safety (1-10): Are the proposed changes safe, minimal, and unlikely to cause regressions?",
-          "- Overall (1-10): Overall quality of the plan as a blueprint for implementation.",
-          "",
-          "Return ONLY a JSON object with fields: overallScore, correctnessScore, completenessScore, safetyScore, rationale (string explaining your scoring).",
-        ].join("\n"),
-      },
-      {
-        role: "user",
-        content: [
-          "## GitHub Issue",
-          "",
-          "**Title:** " + issueTitle,
-          "",
-          issueBody,
-          "",
-          "## Agent's Plan",
-          "",
-          planContent,
-          "",
-          "## Gold Patch (the actual fix that was merged)",
-          "",
-          "```diff",
-          goldPatchContent,
-          "```",
-        ].join("\n"),
-      },
-    ],
-    isValidPlanScore,
-  );
+  const systemPrompt = [
+    `You are an expert code reviewer evaluating an AI agent's implementation plan.`,
+    `You will be shown the GitHub issue, the agent's plan, and the gold patch (the actual merged fix).`,
+    `Score the plan on:`,
+    `- correctnessScore (1-10): root-cause diagnosis and the right files/functions to change`,
+    `- completenessScore (1-10): coverage of edge cases, test updates, related files`,
+    `- safetyScore (1-10): minimality + low regression risk`,
+    `- overallScore (1-10): overall quality of the plan as a blueprint for implementation`,
+    ``,
+    `IMPORTANT: the plan is natural-language. Do NOT penalize it for not matching the gold patch word-for-word. What matters is correct diagnosis + viable fix.`,
+    ``,
+    `Read all three files: ISSUE.md, PLAN.md, GOLD.patch. They are in your working directory.`,
+    `Write your final scores as JSON to \`${GRADER_SANDBOX_ROOT}/${GRADER_OUTPUT_FILENAME}\` with shape:`,
+    `{ "overallScore": 1-10, "correctnessScore": 1-10, "completenessScore": 1-10, "safetyScore": 1-10, "rationale": "..." }`,
+    `Then write a FINAL: summary line.`,
+  ].join("\n");
 
-  // 6. Clamp scores to 1-10
+  const userPrompt = `Read ISSUE.md, PLAN.md, and GOLD.patch, then score the plan and write the JSON to ${GRADER_OUTPUT_FILENAME}.`;
+
+  const parsed = await runPiJsonGrader<unknown>({
+    jobTag: "plan",
+    apiKey: openRouterApiKey,
+    modelId: judgeModelId,
+    systemPrompt,
+    userPrompt,
+    contextFiles: [
+      { name: "ISSUE.md", content: renderIssueDoc(issueTitle, issueBody) },
+      { name: "PLAN.md", content: planContent },
+      { name: "GOLD.patch", content: goldPatchContent },
+    ],
+  });
+  const scores = parsePlanScore(parsed);
+
   const overallScore = clampScore(Math.round(scores.overallScore), 1, 10);
-  const correctnessScore = clampScore(
-    Math.round(scores.correctnessScore),
-    1,
-    10,
-  );
-  const completenessScore = clampScore(
-    Math.round(scores.completenessScore),
-    1,
-    10,
-  );
+  const correctnessScore = clampScore(Math.round(scores.correctnessScore), 1, 10);
+  const completenessScore = clampScore(Math.round(scores.completenessScore), 1, 10);
   const safetyScore = clampScore(Math.round(scores.safetyScore), 1, 10);
 
-  // 7. Insert into plan_scores
   const [inserted] = await db
     .insert(planScores)
     .values({
       planId,
       caseVersionId,
-      rubricVersion: "pilab.grading-plan.v2",
-      promptVersion: "pilab.grading-plan.v2",
+      rubricVersion: "pilab.grading-plan.pi.v1",
+      promptVersion: "pilab.grading-plan.pi.v1",
       judgeRunOrdinal: 1,
       overallScore: String(overallScore),
       correctnessScore,
@@ -451,7 +218,6 @@ async function gradePlan(
       isPublic: false,
     })
     .returning({ id: planScores.id });
-
   if (!inserted) {
     throw new Error("Failed to insert plan score");
   }
@@ -470,9 +236,7 @@ async function gradePlan(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Implementation grading processor
-// ---------------------------------------------------------------------------
+// ── Implementation grading ─────────────────────────────────────────────────
 
 type ImplementationScoreParsed = {
   overallScore: number;
@@ -480,14 +244,20 @@ type ImplementationScoreParsed = {
   rationale: string;
 };
 
-function isValidImplementationScore(
-  value: unknown,
-): value is ImplementationScoreParsed {
-  if (!isRecord(value)) return false;
-  if (typeof value.overallScore !== "number") return false;
-  if (typeof value.diffSimilarityScore !== "number") return false;
-  if (typeof value.rationale !== "string") return false;
-  return true;
+function parseImplementationScore(value: unknown): ImplementationScoreParsed {
+  if (!isRecord(value)) {
+    throw new Error("Impl grader output must be a JSON object");
+  }
+  const overallScore = readNumber(value, "overallScore");
+  const diffSimilarityScore = readNumber(value, "diffSimilarityScore");
+  if (overallScore == null || diffSimilarityScore == null) {
+    throw new Error("Impl grader output missing numeric score fields");
+  }
+  return {
+    overallScore,
+    diffSimilarityScore,
+    rationale: readString(value, "rationale"),
+  };
 }
 
 async function gradeImplementation(
@@ -499,7 +269,6 @@ async function gradeImplementation(
 
   console.log(`[grader] grading implementation patch ${patchId} for run ${runId}`);
 
-  // 1. Load the predicted patch
   const patch = await db.query.patches.findFirst({
     where: eq(patches.id, patchId),
   });
@@ -507,24 +276,11 @@ async function gradeImplementation(
     throw new Error(`Patch not found: ${patchId}`);
   }
 
-  // 2. Load patch artifact
-  let predictedPatchContent = "";
-  if (patch.artifactId) {
-    const patchArtifact = await db.query.artifacts.findFirst({
-      where: eq(artifacts.id, patch.artifactId),
-    });
-    if (patchArtifact) {
-      predictedPatchContent = await objectStore.getArtifactText(
-        patchArtifact.objectKey,
-      );
-    }
-  }
-
+  const predictedPatchContent = await loadPatchContent(patch);
   if (!predictedPatchContent || predictedPatchContent.trim().length === 0) {
     throw new Error(`Patch artifact content not found for patch ${patchId}`);
   }
 
-  // 3. Load gold patch artifact
   const caseVersion = await db.query.caseVersions.findFirst({
     where: eq(caseVersions.id, caseVersionId),
   });
@@ -532,90 +288,57 @@ async function gradeImplementation(
     throw new Error(`Case version not found: ${caseVersionId}`);
   }
 
-  let goldPatchContent = "";
-  if (caseVersion.goldPatchArtifactId) {
-    const goldArtifact = await db.query.artifacts.findFirst({
-      where: eq(artifacts.id, caseVersion.goldPatchArtifactId),
-    });
-    if (goldArtifact) {
-      goldPatchContent = await objectStore.getArtifactText(
-        goldArtifact.objectKey,
-      );
-    }
-  }
-
+  const goldPatchContent = await loadGoldPatch(caseVersion.goldPatchArtifactId);
   if (!goldPatchContent || goldPatchContent.trim().length === 0) {
-    throw new Error(
-      `Gold patch not found for case version ${caseVersionId}`,
-    );
+    throw new Error(`Gold patch not found for case version ${caseVersionId}`);
   }
 
-  // 4. Compute diff similarity
-  const diffSimilarity = computeJaccardSimilarity(
+  const computedJaccard = computeJaccardSimilarity(
     predictedPatchContent,
     goldPatchContent,
   );
-  const diffSimilarityRounded = Math.round(diffSimilarity * 1_0000) / 1_0000;
+  const computedJaccardRounded = Math.round(computedJaccard * 10_000) / 10_000;
 
-  console.log(
-    `[grader] computed Jaccard diff similarity: ${diffSimilarityRounded}`,
-  );
+  const systemPrompt = [
+    `You are an expert code reviewer comparing a predicted patch (PREDICTED.patch) to the gold (correct) patch (GOLD.patch).`,
+    `Score the predicted patch on:`,
+    `- overallScore (1-10): how well it matches the gold patch in intent + correctness`,
+    `- diffSimilarityScore (0-1): how similar the actual code changes are (your own judgment, not a mechanical metric)`,
+    ``,
+    `Read both files from your working directory.`,
+    `Write your final scores as JSON to \`${GRADER_SANDBOX_ROOT}/${GRADER_OUTPUT_FILENAME}\` with shape:`,
+    `{ "overallScore": 1-10, "diffSimilarityScore": 0-1, "rationale": "..." }`,
+    `Then write a FINAL: summary line.`,
+  ].join("\n");
 
-  // 5. Call OpenRouter
-  const { result: scores } =
-    await callOpenRouterStructured<ImplementationScoreParsed>(
-      { apiKey: openRouterApiKey, modelId: judgeModelId },
-      implementationScoreSchema,
-      "pilab_implementation_score",
-      [
-        {
-          role: "system",
-          content: [
-            "You are an expert code reviewer comparing a predicted patch to the gold (correct) patch.",
-            "",
-            "Score the predicted patch on:",
-            "- Overall (1-10): How well does it match the gold patch in intent and correctness?",
-            "- Diff Similarity (0-1): How similar are the actual code changes?",
-            "",
-            "Return ONLY a JSON object with fields: overallScore, diffSimilarityScore, rationale.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: [
-            "## Predicted Patch",
-            "",
-            "```diff",
-            predictedPatchContent,
-            "```",
-            "",
-            "## Gold Patch (correct fix)",
-            "",
-            "```diff",
-            goldPatchContent,
-            "```",
-          ].join("\n"),
-        },
-      ],
-      isValidImplementationScore,
-    );
+  const userPrompt = `Read PREDICTED.patch and GOLD.patch, then score the predicted patch and write the JSON to ${GRADER_OUTPUT_FILENAME}.`;
+
+  const parsed = await runPiJsonGrader<unknown>({
+    jobTag: "impl",
+    apiKey: openRouterApiKey,
+    modelId: judgeModelId,
+    systemPrompt,
+    userPrompt,
+    contextFiles: [
+      { name: "PREDICTED.patch", content: predictedPatchContent },
+      { name: "GOLD.patch", content: goldPatchContent },
+    ],
+  });
+  const scores = parseImplementationScore(parsed);
 
   const overallScore = clampScore(Math.round(scores.overallScore), 1, 10);
   const llmSimilarityScore = clampScore(scores.diffSimilarityScore, 0, 1);
 
-  // 6. Update evaluations table
   let evaluationId: string | undefined;
-
   const existingEvaluation = await db.query.evaluations.findFirst({
     where: eq(evaluations.patchId, patchId),
   });
-
   if (existingEvaluation) {
     evaluationId = existingEvaluation.id;
     await db
       .update(evaluations)
       .set({
-        diffSimilarityScore: String(diffSimilarityRounded),
+        diffSimilarityScore: String(computedJaccardRounded),
         status: "passed",
         finishedAt: new Date(),
         rawResults: {
@@ -623,7 +346,7 @@ async function gradeImplementation(
           grader: {
             overallScore,
             diffSimilarityScore: llmSimilarityScore,
-            computedJaccard: diffSimilarityRounded,
+            computedJaccard: computedJaccardRounded,
             rationale: scores.rationale,
             judgeModelId,
           },
@@ -631,22 +354,21 @@ async function gradeImplementation(
       })
       .where(eq(evaluations.id, existingEvaluation.id));
   } else {
-    // Create a minimal evaluation record
     const [created] = await db
       .insert(evaluations)
       .values({
         runId,
         patchId,
         caseVersionId,
-        evaluatorVersion: "pilab.grader.v1",
+        evaluatorVersion: "pilab.grader.pi.v1",
         status: "passed",
         resolved: true,
-        diffSimilarityScore: String(diffSimilarityRounded),
+        diffSimilarityScore: String(computedJaccardRounded),
         rawResults: {
           grader: {
             overallScore,
             diffSimilarityScore: llmSimilarityScore,
-            computedJaccard: diffSimilarityRounded,
+            computedJaccard: computedJaccardRounded,
             rationale: scores.rationale,
             judgeModelId,
           },
@@ -655,11 +377,9 @@ async function gradeImplementation(
         finishedAt: new Date(),
       })
       .returning({ id: evaluations.id });
-
     if (!created) {
       throw new Error("Failed to create evaluation record");
     }
-
     evaluationId = created.id;
   }
 
@@ -668,39 +388,33 @@ async function gradeImplementation(
   }
 
   console.log(
-    `[grader] implementation ${patchId} scored: overall=${overallScore} jaccard=${diffSimilarityRounded}`,
+    `[grader] implementation ${patchId} scored: overall=${overallScore} jaccard=${computedJaccardRounded}`,
   );
 
   return {
     implementationScoreId: evaluationId,
     overallScore,
-    diffSimilarityScore: diffSimilarityRounded,
+    diffSimilarityScore: computedJaccardRounded,
     rationale: scores.rationale,
   };
 }
 
-// ---------------------------------------------------------------------------
-// External comparison processor
-// ---------------------------------------------------------------------------
+// ── Head-to-head external comparison ───────────────────────────────────────
 
 type ExternalVerdictParsed = {
   winner: "A" | "B" | "tie";
   rationale: string;
 };
 
-function isValidExternalVerdict(
-  value: unknown,
-): value is ExternalVerdictParsed {
-  if (!isRecord(value)) return false;
-  if (
-    value.winner !== "A" &&
-    value.winner !== "B" &&
-    value.winner !== "tie"
-  ) {
-    return false;
+function parseExternalVerdict(value: unknown): ExternalVerdictParsed {
+  if (!isRecord(value)) {
+    throw new Error("External grader output must be a JSON object");
   }
-  if (typeof value.rationale !== "string") return false;
-  return true;
+  const winner = value.winner;
+  if (winner !== "A" && winner !== "B" && winner !== "tie") {
+    throw new Error(`External grader winner must be A | B | tie, got: ${String(winner)}`);
+  }
+  return { winner, rationale: readString(value, "rationale") };
 }
 
 async function gradeExternal(
@@ -714,115 +428,70 @@ async function gradeExternal(
     `[grader] comparing runs A=${runAId} vs B=${runBId} for experiment ${experimentId}`,
   );
 
-  // 1. Load both runs
   const [runA, runB] = await Promise.all([
     db.query.runs.findFirst({ where: eq(runs.id, runAId) }),
     db.query.runs.findFirst({ where: eq(runs.id, runBId) }),
   ]);
-
   if (!runA) throw new Error(`Run A not found: ${runAId}`);
   if (!runB) throw new Error(`Run B not found: ${runBId}`);
 
-  // 2. Load patches for both runs
   const [patchesA, patchesB, evalsA, evalsB] = await Promise.all([
-    db.query.patches.findMany({
-      where: eq(patches.runId, runAId),
-    }),
-    db.query.patches.findMany({
-      where: eq(patches.runId, runBId),
-    }),
-    db.query.evaluations.findMany({
-      where: eq(evaluations.runId, runAId),
-    }),
-    db.query.evaluations.findMany({
-      where: eq(evaluations.runId, runBId),
-    }),
+    db.query.patches.findMany({ where: eq(patches.runId, runAId) }),
+    db.query.patches.findMany({ where: eq(patches.runId, runBId) }),
+    db.query.evaluations.findMany({ where: eq(evaluations.runId, runAId) }),
+    db.query.evaluations.findMany({ where: eq(evaluations.runId, runBId) }),
   ]);
 
-  // 3. Load patch artifacts
-  async function loadPatchContent(
-    patchRow: typeof patches.$inferSelect,
-  ): Promise<string> {
-    if (!patchRow.artifactId) return "";
-    const artifact = await db.query.artifacts.findFirst({
-      where: eq(artifacts.id, patchRow.artifactId),
-    });
-    if (!artifact) return "";
-    try {
-      return await objectStore.getArtifactText(artifact.objectKey);
-    } catch {
-      return "";
-    }
-  }
+  const patchContentA = (await Promise.all(patchesA.map(loadPatchContent))).join("\n\n");
+  const patchContentB = (await Promise.all(patchesB.map(loadPatchContent))).join("\n\n");
 
-  const patchContentA = (
-    await Promise.all(patchesA.map(loadPatchContent))
-  ).join("\n\n");
-  const patchContentB = (
-    await Promise.all(patchesB.map(loadPatchContent))
-  ).join("\n\n");
-
-  // Build test result summaries
   const summaryA = evalsA[0];
   const summaryB = evalsB[0];
 
-  const testResultA = summaryA
-    ? `Status: ${summaryA.status}, Resolved: ${summaryA.resolved}, ` +
-      `Fail-to-pass: ${summaryA.failToPassPassed}/${summaryA.failToPassTotal}, ` +
-      `Pass-to-pass: ${summaryA.passToPassPassed}/${summaryA.passToPassTotal}`
-    : "No evaluation results";
+  const summary = [
+    `# Comparison brief`,
+    ``,
+    `## Agent A test results`,
+    summaryA
+      ? `Status: ${summaryA.status}, Resolved: ${summaryA.resolved}, Fail-to-pass: ${summaryA.failToPassPassed}/${summaryA.failToPassTotal}, Pass-to-pass: ${summaryA.passToPassPassed}/${summaryA.passToPassTotal}`
+      : "No evaluation results",
+    ``,
+    `## Agent B test results`,
+    summaryB
+      ? `Status: ${summaryB.status}, Resolved: ${summaryB.resolved}, Fail-to-pass: ${summaryB.failToPassPassed}/${summaryB.failToPassTotal}, Pass-to-pass: ${summaryB.passToPassPassed}/${summaryB.passToPassTotal}`
+      : "No evaluation results",
+  ].join("\n");
 
-  const testResultB = summaryB
-    ? `Status: ${summaryB.status}, Resolved: ${summaryB.resolved}, ` +
-      `Fail-to-pass: ${summaryB.failToPassPassed}/${summaryB.failToPassTotal}, ` +
-      `Pass-to-pass: ${summaryB.passToPassPassed}/${summaryB.passToPassTotal}`
-    : "No evaluation results";
+  const systemPrompt = [
+    `You are an impartial judge comparing two coding agent solutions to the same GitHub issue.`,
+    `Read AGENT_A.patch, AGENT_B.patch, and SUMMARY.md (test result summaries) from your working directory.`,
+    `Pick the better solution or declare a tie.`,
+    ``,
+    `Write your final verdict as JSON to \`${GRADER_SANDBOX_ROOT}/${GRADER_OUTPUT_FILENAME}\` with shape:`,
+    `{ "winner": "A" | "B" | "tie", "rationale": "..." }`,
+    `Then write a FINAL: summary line.`,
+  ].join("\n");
 
-  // 4. Call OpenRouter
-  const { result: verdict } =
-    await callOpenRouterStructured<ExternalVerdictParsed>(
-      { apiKey: openRouterApiKey, modelId: judgeModelId },
-      externalVerdictSchema,
-      "pilab_external_verdict",
-      [
-        {
-          role: "system",
-          content: [
-            "You are an impartial judge comparing two coding agent solutions to the same GitHub issue.",
-            "",
-            "Pick the better solution or declare a tie. Return JSON with: { winner: \"A\" | \"B\" | \"tie\", rationale: string }",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: [
-            "## Agent A Patch",
-            "",
-            "```diff",
-            patchContentA || "(no patch available)",
-            "```",
-            "",
-            "## Agent B Patch",
-            "",
-            "```diff",
-            patchContentB || "(no patch available)",
-            "```",
-            "",
-            "## Test Results",
-            `Agent A: ${testResultA}`,
-            `Agent B: ${testResultB}`,
-          ].join("\n"),
-        },
-      ],
-      isValidExternalVerdict,
-    );
+  const userPrompt = `Compare AGENT_A.patch against AGENT_B.patch, factor in SUMMARY.md, then write the verdict JSON to ${GRADER_OUTPUT_FILENAME}.`;
 
-  // 5. Map winner to run ID
+  const parsed = await runPiJsonGrader<unknown>({
+    jobTag: "external",
+    apiKey: openRouterApiKey,
+    modelId: judgeModelId,
+    systemPrompt,
+    userPrompt,
+    contextFiles: [
+      { name: "AGENT_A.patch", content: patchContentA || "(no patch)" },
+      { name: "AGENT_B.patch", content: patchContentB || "(no patch)" },
+      { name: "SUMMARY.md", content: summary },
+    ],
+  });
+  const verdict = parseExternalVerdict(parsed);
+
   let winnerRunId: string | null = null;
   if (verdict.winner === "A") winnerRunId = runAId;
   else if (verdict.winner === "B") winnerRunId = runBId;
 
-  // 6. Insert into grader_verdicts
   const [inserted] = await db
     .insert(graderVerdicts)
     .values({
@@ -831,13 +500,9 @@ async function gradeExternal(
       runBId,
       winnerRunId,
       reasoning: verdict.rationale,
-      metadata: {
-        judgeModelId,
-        graderVersion: "pilab.grader.v1",
-      },
+      metadata: { judgeModelId, graderVersion: "pilab.grader.pi.v1" },
     })
     .returning({ id: graderVerdicts.id });
-
   if (!inserted) {
     throw new Error("Failed to insert grader verdict");
   }
@@ -853,57 +518,107 @@ async function gradeExternal(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Worker creation
-// ---------------------------------------------------------------------------
+// ── Artifact / DB loaders ──────────────────────────────────────────────────
 
-function createPlanProcessor(db: DbClient) {
-  return async (job: {
-    data: GradingPlanJobData;
-  }): Promise<GradingPlanJobResult> => {
-    return gradePlan(db, job);
+async function loadPlanContent(plan: typeof plans.$inferSelect): Promise<string> {
+  if (plan.rawArtifactId) {
+    const planArtifact = await db.query.artifacts.findFirst({
+      where: eq(artifacts.id, plan.rawArtifactId),
+    });
+    if (planArtifact) {
+      try {
+        const planJson = await objectStore.getJsonArtifact<JsonValue>(
+          planArtifact.objectKey,
+        );
+        if (isRecord(planJson) && typeof planJson.planMarkdown === "string") {
+          return planJson.planMarkdown;
+        }
+        return typeof planJson === "string"
+          ? planJson
+          : JSON.stringify(planJson, null, 2);
+      } catch (error) {
+        console.warn(
+          `[grader] could not load plan artifact ${planArtifact.objectKey}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+  return plan.planMarkdown ?? JSON.stringify(plan.planJson ?? {});
+}
+
+async function loadIssue(
+  db: DbClient,
+  githubIssueId: string | null,
+): Promise<{ issueTitle: string; issueBody: string }> {
+  if (!githubIssueId) return { issueTitle: "", issueBody: "" };
+  const issue = await db.query.githubIssues.findFirst({
+    where: eq(githubIssues.id, githubIssueId),
+  });
+  return {
+    issueTitle: issue?.title ?? "",
+    issueBody: issue?.body ?? "",
   };
 }
 
-function createImplementationProcessor(db: DbClient) {
-  return async (job: {
-    data: GradingImplementationJobData;
-  }): Promise<GradingImplementationJobResult> => {
-    return gradeImplementation(db, job);
-  };
+async function loadGoldPatch(goldPatchArtifactId: string | null): Promise<string> {
+  if (!goldPatchArtifactId) return "";
+  const goldArtifact = await db.query.artifacts.findFirst({
+    where: eq(artifacts.id, goldPatchArtifactId),
+  });
+  if (!goldArtifact) return "";
+  try {
+    return await objectStore.getArtifactText(goldArtifact.objectKey);
+  } catch {
+    return "";
+  }
 }
 
-function createExternalProcessor(db: DbClient) {
-  return async (job: {
-    data: GradingExternalJobData;
-  }): Promise<GradingExternalJobResult> => {
-    return gradeExternal(db, job);
-  };
+async function loadPatchContent(
+  patchRow: typeof patches.$inferSelect,
+): Promise<string> {
+  if (!patchRow.artifactId) return "";
+  const artifact = await db.query.artifacts.findFirst({
+    where: eq(artifacts.id, patchRow.artifactId),
+  });
+  if (!artifact) return "";
+  try {
+    return await objectStore.getArtifactText(artifact.objectKey);
+  } catch {
+    return "";
+  }
 }
+
+function renderIssueDoc(title: string, body: string): string {
+  return `# ${title || "(no title)"}\n\n${body || "_(no body)_"}\n`;
+}
+
+// ── Worker setup ───────────────────────────────────────────────────────────
 
 const planWorker = new Worker<GradingPlanJobData, GradingPlanJobResult>(
   GRADING_PLAN_QUEUE_NAME,
-  createPlanProcessor(db),
+  async (job) => gradePlan(db, job),
   { connection, concurrency: 1 },
 );
 
-const implementationWorker =
-  new Worker<GradingImplementationJobData, GradingImplementationJobResult>(
-    GRADING_IMPLEMENTATION_QUEUE_NAME,
-    createImplementationProcessor(db),
-    { connection, concurrency: 1 },
-  );
+const implementationWorker = new Worker<
+  GradingImplementationJobData,
+  GradingImplementationJobResult
+>(
+  GRADING_IMPLEMENTATION_QUEUE_NAME,
+  async (job) => gradeImplementation(db, job),
+  { connection, concurrency: 1 },
+);
 
-const externalWorker =
-  new Worker<GradingExternalJobData, GradingExternalJobResult>(
-    GRADING_EXTERNAL_QUEUE_NAME,
-    createExternalProcessor(db),
-    { connection, concurrency: 1 },
-  );
-
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
+const externalWorker = new Worker<
+  GradingExternalJobData,
+  GradingExternalJobResult
+>(
+  GRADING_EXTERNAL_QUEUE_NAME,
+  async (job) => gradeExternal(db, job),
+  { connection, concurrency: 1 },
+);
 
 function attachEvents<DataType = unknown, ResultType = unknown>(
   worker: Worker<DataType, ResultType>,
@@ -912,25 +627,15 @@ function attachEvents<DataType = unknown, ResultType = unknown>(
   worker.on("ready", () => {
     console.log(`[grader] ${label} worker ready`);
   });
-
   worker.on("active", (job) => {
-    console.log(
-      `[grader] ${label} started job ${job.id ?? "(unknown)"} (${job.name})`,
-    );
+    console.log(`[grader] ${label} started job ${job.id ?? "(unknown)"} (${job.name})`);
   });
-
   worker.on("completed", (job) => {
-    console.log(
-      `[grader] ${label} completed job ${job.id ?? "(unknown)"}`,
-    );
+    console.log(`[grader] ${label} completed job ${job.id ?? "(unknown)"}`);
   });
-
   worker.on("failed", (job, error) => {
-    console.error(
-      `[grader] ${label} failed job ${job?.id ?? "(unknown)"}: ${error.message}`,
-    );
+    console.error(`[grader] ${label} failed job ${job?.id ?? "(unknown)"}: ${error.message}`);
   });
-
   worker.on("error", (error) => {
     console.error(`[grader] ${label} worker error: ${error.message}`);
   });
@@ -939,10 +644,6 @@ function attachEvents<DataType = unknown, ResultType = unknown>(
 attachEvents(planWorker, "plan");
 attachEvents(implementationWorker, "implementation");
 attachEvents(externalWorker, "external");
-
-// ---------------------------------------------------------------------------
-// Shutdown
-// ---------------------------------------------------------------------------
 
 process.once("SIGINT", () => {
   void shutdown("SIGINT");
@@ -974,18 +675,10 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
-
 function readRequiredEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(`${name} is required`);
   }
   return value;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

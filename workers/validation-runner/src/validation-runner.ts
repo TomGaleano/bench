@@ -20,7 +20,6 @@ import {
 } from "@pilab/jobs";
 import type { JsonValue, StoredArtifact } from "@pilab/object-store";
 import { and, eq } from "drizzle-orm";
-import { gradePatch, type ValidationGraderInput } from "@pilab/grader";
 import {
   cloneRepoAtCommitInRuntime,
   createBenchmarkRuntime,
@@ -272,13 +271,6 @@ export function createDrizzleValidationRunnerStore(
   };
 }
 
-export type GraderConfig = {
-  apiKey: string;
-  modelId: string;
-  threshold?: number;
-  fetchImpl?: typeof fetch;
-};
-
 export function createValidationRunnerProcessor(input: {
   store: ValidationRunnerStore;
   objectStore?: ValidationRunnerObjectStoreLike;
@@ -286,12 +278,10 @@ export function createValidationRunnerProcessor(input: {
   runtime?: RuntimeProvider;
   runnerVersion?: string;
   commandTimeoutMs?: number;
-  grader?: GraderConfig;
 }) {
   const baseExecutor = input.executor ?? createRuntimeGitCommandExecutor(input.runtime ?? createBenchmarkRuntime());
   const runnerVersion = input.runnerVersion ?? "pilab.validation-runner.v1";
   const commandTimeoutMs = input.commandTimeoutMs ?? 300_000;
-  const graderThreshold = input.grader?.threshold ?? 70;
 
   return async (job: {
     data: ValidationRunnerJobData;
@@ -389,7 +379,7 @@ export function createValidationRunnerProcessor(input: {
         proposedTests,
         caseVersion,
         candidateHasBehavioralReproduction,
-        hasGrader: Boolean(input.grader),
+        hasGrader: false,
       });
 
       await job.updateProgress(
@@ -430,22 +420,6 @@ export function createValidationRunnerProcessor(input: {
         });
       }
 
-      if (candidateHasBehavioralReproduction) {
-        await job.updateProgress(
-          createValidationRunnerProgress(
-            "running-behavioral-reproduction",
-            "Running behavioral reproduction",
-          ),
-        );
-        const behavioralReproduction = (candidateArtifactContent as Record<string, unknown>).candidate as Record<string, unknown>;
-        behavioralResults = await validateBehavioralReproduction({
-          caseVersion,
-          behavioralReproduction: behavioralReproduction.behavioralReproduction as { script: string; rationale: string },
-          executor,
-          commandTimeoutMs,
-        });
-      }
-
       if (proposedTests.length > 0) {
         await job.updateProgress(
           createValidationRunnerProgress(
@@ -459,7 +433,13 @@ export function createValidationRunnerProcessor(input: {
           executor,
           commandTimeoutMs,
           repositoryReady: repository.ready,
-          updateProgress: (p) => job.updateProgress(createValidationRunnerProgress(p.stage, p.message)),
+          updateProgress: (p) =>
+            job.updateProgress(
+              createValidationRunnerProgress(
+                p.stage as Parameters<typeof createValidationRunnerProgress>[0],
+                p.message,
+              ),
+            ),
         });
       }
 
@@ -472,56 +452,19 @@ export function createValidationRunnerProcessor(input: {
 
       const hasValidationErrors =
         inputIssues.some((issue) => issue.severity === "error") ||
-        (testPatchResults?.issues.some((i) => i.severity === "error") ?? false) ||
-        (behavioralResults?.issues.some((i) => i.severity === "error") ?? false);
+        (testPatchResults?.issues.some((i) => i.severity === "error") ?? false);
 
       let status: Exclude<ValidationStatus, "queued" | "running" | "cancelled"> = "rejected";
-      let graderResult: Awaited<ReturnType<typeof gradePatch>> | null = null;
 
       if (!hasValidationErrors) {
         if (testPatchResults && testPatchResults.failToPassTests.length > 0) {
           status = "accepted";
-        } else if (testPatchResults && testPatchResults.failToPassTests.length === 0) {
-          // Test patch exists but produced no fail-to-pass tests.
-          // Fall through to agent tests or grader rather than hard-rejecting.
-          if (testResults.length > 0) {
-            status = rejectedTestIds.length === 0 ? "accepted" : "rejected";
-          } else if (input.grader && input.objectStore) {
-            await job.updateProgress(
-              createValidationRunnerProgress(
-                "running-grader",
-                "Running grader agent for semantic evaluation",
-              ),
-            );
-            graderResult = await runGraderFallback({
-              caseVersion,
-              store: input.store,
-              objectStore: input.objectStore,
-              grader: input.grader,
-            });
-            status = graderResult.score >= graderThreshold ? "accepted" : "rejected";
-          } else {
-            status = "rejected";
-          }
-        } else if (behavioralResults) {
-          status = behavioralResults.reproducedOnBase && behavioralResults.fixedOnGold ? "accepted" : "rejected";
         } else if (testResults.length > 0) {
           status = rejectedTestIds.length === 0 ? "accepted" : "rejected";
-        } else if (input.grader && input.objectStore) {
-          await job.updateProgress(
-            createValidationRunnerProgress(
-              "running-grader",
-              "Running grader agent for semantic evaluation",
-            ),
-          );
-          graderResult = await runGraderFallback({
-            caseVersion,
-            store: input.store,
-            objectStore: input.objectStore,
-            grader: input.grader,
-          });
-          status = graderResult.score >= graderThreshold ? "accepted" : "rejected";
         } else {
+          // No valid tests and no agent-proposed tests either. Reject so the
+          // outer retry loop can either try again or lock the case to
+          // llm_evaluator_only after the attempt cap.
           status = "rejected";
         }
       }
@@ -547,21 +490,6 @@ export function createValidationRunnerProcessor(input: {
               failToPassTests: testPatchResults.failToPassTests,
               passToPassTests: testPatchResults.passToPassTests,
               failToFailTests: testPatchResults.failToFailTests,
-            }
-          : null,
-        behavioralReproduction: behavioralResults
-          ? {
-              reproducedOnBase: behavioralResults.reproducedOnBase,
-              fixedOnGold: behavioralResults.fixedOnGold,
-            }
-          : null,
-        graderResult: graderResult
-          ? {
-              score: graderResult.score,
-              correctness: graderResult.correctness,
-              completeness: graderResult.completeness,
-              safety: graderResult.safety,
-              reasoning: graderResult.reasoning,
             }
           : null,
         tests: testResults,
@@ -639,23 +567,6 @@ export function createValidationRunnerProcessor(input: {
       if (testPatchResults) {
         result.failToPassTests = testPatchResults.failToPassTests;
         result.passToPassTests = testPatchResults.passToPassTests;
-      }
-
-      if (behavioralResults) {
-        result.behavioralReproductionResult = {
-          reproducedOnBase: behavioralResults.reproducedOnBase,
-          fixedOnGold: behavioralResults.fixedOnGold,
-        };
-      }
-
-      if (graderResult) {
-        result.graderResult = {
-          score: graderResult.score,
-          correctness: graderResult.correctness,
-          completeness: graderResult.completeness,
-          safety: graderResult.safety,
-          reasoning: graderResult.reasoning,
-        };
       }
 
       return result;
@@ -2030,72 +1941,6 @@ async function writeSetuptoolsScmFallback(executor: GitCommandExecutor, cwd: str
   } catch (error) {
     console.warn(`[validation-runner] setuptools_scm fallback failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-}
-
-async function runGraderFallback(input: {
-  caseVersion: ValidationRunnerCaseVersion;
-  store: ValidationRunnerStore;
-  objectStore: ValidationRunnerObjectStoreLike;
-  grader: GraderConfig;
-}): Promise<Awaited<ReturnType<typeof gradePatch>>> {
-  const [issueArtifact, repoMetaArtifact] = await Promise.all([
-    input.caseVersion.issueArtifactId
-      ? input.store.findArtifactById(input.caseVersion.issueArtifactId)
-      : Promise.resolve(undefined),
-    input.caseVersion.repositoryMetadataArtifactId
-      ? input.store.findArtifactById(input.caseVersion.repositoryMetadataArtifactId)
-      : Promise.resolve(undefined),
-  ]);
-
-  let issueTitle: string | undefined;
-  let issueBody: string | undefined;
-
-  if (issueArtifact) {
-    try {
-      const issueData = await input.objectStore.getJsonArtifact(issueArtifact.objectKey);
-      const issue = isRecord(issueData) && isRecord(issueData.issue) ? issueData.issue : issueData;
-      if (isRecord(issue)) {
-        const title = issue.title;
-        const body = issue.body;
-        if (typeof title === "string") issueTitle = title;
-        if (typeof body === "string") issueBody = body;
-      }
-    } catch {
-      // ignore missing issue artifact
-    }
-  }
-
-  let patchDiff = "";
-  if (repoMetaArtifact) {
-    try {
-      const repoData = await input.objectStore.getJsonArtifact(repoMetaArtifact.objectKey);
-      const changedFiles = isRecord(repoData) && Array.isArray(repoData.changedFiles)
-        ? repoData.changedFiles
-        : [];
-      const patches: string[] = [];
-      for (const file of changedFiles) {
-        if (isRecord(file) && typeof file.patch === "string" && file.patch.length > 0) {
-          const filename = typeof file.filename === "string" ? file.filename : "unknown";
-          patches.push(`--- a/${filename}\n+++ b/${filename}\n${file.patch}`);
-        }
-      }
-      patchDiff = patches.join("\n\n");
-    } catch {
-      // ignore missing repo metadata
-    }
-  }
-
-  const graderInput: ValidationGraderInput = {
-    patchDiff,
-    apiKey: input.grader.apiKey,
-    modelId: input.grader.modelId,
-    ...(input.grader.fetchImpl && { fetchImpl: input.grader.fetchImpl }),
-  };
-  if (issueTitle !== undefined) graderInput.issueTitle = issueTitle;
-  if (issueBody !== undefined) graderInput.issueBody = issueBody;
-
-  console.log(`[validation-runner] Running grader fallback with model ${input.grader.modelId}`);
-  return gradePatch(graderInput);
 }
 
 async function runFile(

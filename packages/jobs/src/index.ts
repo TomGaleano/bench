@@ -13,7 +13,7 @@ export const caseBuilderPrepareJobName = "case-builder.prepare";
 export const validationRunnerQueueName = "pilab.validation-runner";
 export const validationRunnerValidateJobName = "validation-runner.validate";
 export const piRunnerQueueName = "pilab.pi-runner";
-export const piRunnerPlanJobName = "pi-runner.plan";
+export const piRunnerBenchmarkBatchJobName = "pi-runner.benchmark-batch";
 
 export const GRADING_PLAN_QUEUE_NAME = "pilab.grading-plan";
 export const GRADING_IMPLEMENTATION_QUEUE_NAME = "pilab.grading-implementation";
@@ -22,11 +22,6 @@ export const GRADING_EXTERNAL_QUEUE_NAME = "pilab.grading-external";
 export const GRADING_PLAN_JOB_NAME = "grading.plan";
 export const GRADING_IMPLEMENTATION_JOB_NAME = "grading.implementation";
 export const GRADING_EXTERNAL_JOB_NAME = "grading.external";
-export const PI_RUNNER_IMPL_JOB_NAME = "pi-runner.impl";
-
-export const reproductionValidatorQueueName = "pilab.reproduction-validator";
-export const reproductionValidatorValidateJobName = "reproduction-validator.validate";
-
 // Playground exports
 export {
   PLAYGROUND_QUEUE_NAME,
@@ -64,18 +59,15 @@ export type QueueName =
   | typeof piRunnerQueueName
   | typeof GRADING_PLAN_QUEUE_NAME
   | typeof GRADING_IMPLEMENTATION_QUEUE_NAME
-  | typeof GRADING_EXTERNAL_QUEUE_NAME
-  | typeof reproductionValidatorQueueName;
+  | typeof GRADING_EXTERNAL_QUEUE_NAME;
 
 export type JobName =
   | typeof caseBuilderPrepareJobName
   | typeof validationRunnerValidateJobName
-  | typeof piRunnerPlanJobName
-  | typeof PI_RUNNER_IMPL_JOB_NAME
+  | typeof piRunnerBenchmarkBatchJobName
   | typeof GRADING_PLAN_JOB_NAME
   | typeof GRADING_IMPLEMENTATION_JOB_NAME
-  | typeof GRADING_EXTERNAL_JOB_NAME
-  | typeof reproductionValidatorValidateJobName;
+  | typeof GRADING_EXTERNAL_JOB_NAME;
 
 export type CaseBuilderJobStage =
   | "queued"
@@ -99,7 +91,6 @@ export type CaseBuilderPrepareJobData = {
   };
   enqueuedAt: string;
   attemptNumber?: number;
-  strategy?: "unit_tests" | "reproduction_steps";
   previousAttemptId?: string;
   previousValidationLogArtifactId?: string;
 };
@@ -107,7 +98,7 @@ export type CaseBuilderPrepareJobData = {
 export type CaseBuilderPrepareJobResult = {
   caseId: string;
   caseVersionId: string;
-  stage: "ready-for-test-builder" | "ready-for-validation";
+  stage: "ready-for-test-builder" | "ready-for-validation" | "llm-evaluator-only";
   verifiedArtifactCount: number;
   proposedTestCount?: number;
   failToPassCount?: number;
@@ -116,9 +107,6 @@ export type CaseBuilderPrepareJobResult = {
   validationAttemptId?: string;
   validationJobId?: string;
   testBuilderModelId?: string;
-  reproductionStepsId?: string;
-  reproductionStepsArtifactId?: string;
-  strategy?: "unit_tests" | "reproduction_steps";
   completedAt: string;
 };
 
@@ -155,8 +143,6 @@ export type ValidationRunnerJobStage =
   | "checking-repository-refs"
   | "validating-test-patch"
   | "validating-tests"
-  | "running-behavioral-reproduction"
-  | "running-grader"
   | "persisting-results"
   | "accepted"
   | "rejected"
@@ -187,17 +173,6 @@ export type ValidationRunnerJobResult = {
   }>;
   failToPassTests?: string[];
   passToPassTests?: string[];
-  behavioralReproductionResult?: {
-    reproducedOnBase: boolean;
-    fixedOnGold: boolean;
-  };
-  graderResult?: {
-    score: number;
-    correctness: number;
-    completeness: number;
-    safety: number;
-    reasoning: string;
-  };
 };
 
 export type ValidationLogArtifactSummary = {
@@ -239,125 +214,9 @@ export type ValidationRunnerWorker = Worker<
 >;
 export type ValidationRunnerQueueEvents = QueueEvents;
 
-export type PiRunnerJobStage =
-  | "queued"
-  | "loading-run"
-  | "preparing-workspace"
-  | "running-pi"
-  | "persisting-artifacts"
-  | "completed"
-  | "failed";
-
-export type PiRunnerPlanJobData = {
-  runId: string;
-  caseVersionId: string;
-  workspacePath: string;
-  modelId: string;
-  prompt: string;
-  maxTurns: number;
-  maxWallClockSeconds: number;
-  enqueuedAt: string;
-};
-
-export type PiRunnerPlanJobResult = {
-  runId: string;
-  caseVersionId: string;
-  status: "completed" | "failed" | "timeout" | "cancelled";
-  planArtifactId?: string;
-  planArtifactKey?: string;
-  rawSessionArtifactId?: string;
-  rawSessionArtifactKey?: string;
-  eventCount: number;
-  completedAt: string;
-  errorMessage?: string;
-};
-
-export type PiRunnerJobProgress = {
-  stage: PiRunnerJobStage;
-  message: string;
-  at: string;
-};
-
-export type PiRunnerJobSummary = {
-  id: string;
-  name: string;
-  queueName: typeof piRunnerQueueName;
-  state: string;
-  progress: boolean | string | number | PiRunnerJobProgress | object;
-  attemptsMade: number;
-  createdAt: string | null;
-  processedAt: string | null;
-  finishedAt: string | null;
-  failedReason?: string;
-  returnvalue?: unknown;
-  data: PiRunnerPlanJobData;
-};
-
-export type PiRunnerQueue = Queue<PiRunnerPlanJobData, PiRunnerPlanJobResult>;
-export type PiRunnerWorker = Worker<PiRunnerPlanJobData, PiRunnerPlanJobResult>;
+export type PiRunnerQueue = Queue;
+export type PiRunnerWorker = Worker;
 export type PiRunnerQueueEvents = QueueEvents;
-
-export type ReproductionValidatorJobStage =
-  | "queued"
-  | "loading-reproduction-steps"
-  | "cloning-repository"
-  | "running-agent-on-base"
-  | "running-agent-on-gold"
-  | "persisting-results"
-  | "accepted"
-  | "rejected"
-  | "error";
-
-export type ReproductionValidatorJobData = {
-  caseVersionId: string;
-  reproductionStepsId: string;
-  validationAttemptId: string;
-  enqueuedAt: string;
-};
-
-export type ReproductionValidatorJobResult = {
-  caseVersionId: string;
-  reproductionStepsId: string;
-  validationAttemptId: string;
-  status: "accepted" | "rejected" | "error";
-  reproducedOnBase: boolean;
-  fixedOnGold: boolean;
-  baseExitCode: number;
-  goldExitCode: number;
-  completedAt: string;
-  errorMessage?: string;
-};
-
-export type ReproductionValidatorJobProgress = {
-  stage: ReproductionValidatorJobStage;
-  message: string;
-  at: string;
-};
-
-export type ReproductionValidatorJobSummary = {
-  id: string;
-  name: string;
-  queueName: typeof reproductionValidatorQueueName;
-  state: string;
-  progress: boolean | string | number | ReproductionValidatorJobProgress | object;
-  attemptsMade: number;
-  createdAt: string | null;
-  processedAt: string | null;
-  finishedAt: string | null;
-  failedReason?: string;
-  returnvalue?: unknown;
-  data: ReproductionValidatorJobData;
-};
-
-export type ReproductionValidatorQueue = Queue<
-  ReproductionValidatorJobData,
-  ReproductionValidatorJobResult
->;
-export type ReproductionValidatorWorker = Worker<
-  ReproductionValidatorJobData,
-  ReproductionValidatorJobResult
->;
-export type ReproductionValidatorQueueEvents = QueueEvents;
 
 export interface GradingPlanJobData {
   runId: string;
@@ -402,22 +261,96 @@ export interface GradingExternalJobResult {
   rationale: string;
 }
 
-export interface PiRunnerImplJobData {
+// One job per (experiment × case_version). Spawns N Pi agents in a shared E2B
+// sandbox (worktrees off the base commit) and either runs the validated tests
+// against each worktree (deterministic_tests strategy) or spawns a Pi-evaluator
+// agent in the same sandbox to score each worktree against the gold patch
+// (llm_evaluator_only strategy).
+export type BenchmarkBatchAgentSpec = {
   runId: string;
-  caseVersionId: string;
-  planRunId: string;
-  planArtifactId: string;
   modelId: string;
-  maxTurns?: number;
+  modelName: string;
   maxWallClockSeconds?: number;
+};
+
+export interface BenchmarkBatchJobData {
+  experimentId: string;
+  caseVersionId: string;
+  agentRuns: BenchmarkBatchAgentSpec[];
+  /** Optional override for the per-agent wall-clock cap. Defaults to 900s. */
+  maxWallClockSeconds?: number;
+  /** Optional override for the evaluator's wall-clock cap. Defaults to 600s. */
+  maxEvaluatorSeconds?: number;
+  /** Optional model id for the LLM evaluator. Defaults to anthropic/claude-haiku-4-5. */
+  evaluatorModelId?: string;
+  enqueuedAt: string;
 }
 
-export interface PiRunnerImplJobResult {
+export type BenchmarkBatchAgentResult = {
   runId: string;
+  status: "succeeded" | "failed" | "timed_out";
+  patchArtifactId?: string;
+  patchBytes?: number;
+  filesChanged?: number;
+  score?: number;
+  rationale?: string;
+  errorMessage?: string;
+};
+
+export interface BenchmarkBatchJobResult {
+  experimentId: string;
   caseVersionId: string;
-  patchArtifactId: string | null;
-  testResults: Array<{ testName: string; passed: boolean }>;
-  resolved: boolean;
+  sandboxId: string | null;
+  strategy: "deterministic_tests" | "llm_evaluator_only";
+  agentResults: BenchmarkBatchAgentResult[];
+  evaluatorRunId: string | null;
+  completedAt: string;
+}
+
+export type BenchmarkBatchJobStage =
+  | "queued"
+  | "loading-context"
+  | "preparing-sandbox"
+  | "running-agents"
+  | "collecting-patches"
+  | "scoring-deterministic"
+  | "scoring-evaluator"
+  | "persisting-results"
+  | "completed"
+  | "failed";
+
+export type BenchmarkBatchJobProgress = {
+  stage: BenchmarkBatchJobStage;
+  message: string;
+  at: string;
+};
+
+export function createBenchmarkBatchProgress(
+  stage: BenchmarkBatchJobStage,
+  message: string,
+): BenchmarkBatchJobProgress {
+  return { stage, message, at: new Date().toISOString() };
+}
+
+export function createBenchmarkBatchJobId(
+  experimentId: string,
+  caseVersionId: string,
+): string {
+  return `pi-runner-batch-${experimentId}-${caseVersionId}`;
+}
+
+export async function enqueueBenchmarkBatchJob(
+  queue: PiRunnerQueue,
+  data: BenchmarkBatchJobData,
+): Promise<{ id: string }> {
+  const job = await queue.add(
+    piRunnerBenchmarkBatchJobName as never,
+    data as never,
+    {
+      jobId: createBenchmarkBatchJobId(data.experimentId, data.caseVersionId),
+    },
+  );
+  return { id: String(job.id) };
 }
 
 export function createRedisConnection(redisUrl: string, options: RedisOptions = {}): Redis {
@@ -467,7 +400,7 @@ export function createValidationRunnerQueueEvents(input: {
 export function createPiRunnerQueue(input: {
   connection: Redis;
 }): PiRunnerQueue {
-  return new Queue<PiRunnerPlanJobData, PiRunnerPlanJobResult>(
+  return new Queue(
     piRunnerQueueName,
     {
       connection: input.connection,
@@ -480,26 +413,6 @@ export function createPiRunnerQueueEvents(input: {
   connection: Redis;
 }): PiRunnerQueueEvents {
   return new QueueEvents(piRunnerQueueName, {
-    connection: input.connection,
-  });
-}
-
-export function createReproductionValidatorQueue(input: {
-  connection: Redis;
-}): ReproductionValidatorQueue {
-  return new Queue<ReproductionValidatorJobData, ReproductionValidatorJobResult>(
-    reproductionValidatorQueueName,
-    {
-      connection: input.connection,
-      defaultJobOptions: defaultReproductionValidatorJobOptions(),
-    },
-  );
-}
-
-export function createReproductionValidatorQueueEvents(input: {
-  connection: Redis;
-}): ReproductionValidatorQueueEvents {
-  return new QueueEvents(reproductionValidatorQueueName, {
     connection: input.connection,
   });
 }
@@ -538,36 +451,6 @@ export function createValidationRunnerWorker(input: {
 }): ValidationRunnerWorker {
   return new Worker<ValidationRunnerJobData, ValidationRunnerJobResult>(
     validationRunnerQueueName,
-    input.processor,
-    {
-      connection: input.connection,
-      concurrency: input.concurrency ?? 1,
-    },
-  );
-}
-
-export function createPiRunnerWorker(input: {
-  connection: Redis;
-  processor: Processor<PiRunnerPlanJobData, PiRunnerPlanJobResult>;
-  concurrency?: number;
-}): PiRunnerWorker {
-  return new Worker<PiRunnerPlanJobData, PiRunnerPlanJobResult>(
-    piRunnerQueueName,
-    input.processor,
-    {
-      connection: input.connection,
-      concurrency: input.concurrency ?? 1,
-    },
-  );
-}
-
-export function createReproductionValidatorWorker(input: {
-  connection: Redis;
-  processor: Processor<ReproductionValidatorJobData, ReproductionValidatorJobResult>;
-  concurrency?: number;
-}): ReproductionValidatorWorker {
-  return new Worker<ReproductionValidatorJobData, ReproductionValidatorJobResult>(
-    reproductionValidatorQueueName,
     input.processor,
     {
       connection: input.connection,
@@ -624,30 +507,6 @@ export async function getValidationRunnerJobSummary(
   return summarizeValidationRunnerJob(job, await job.getState());
 }
 
-export async function enqueuePiRunnerPlanJob(
-  queue: PiRunnerQueue,
-  data: PiRunnerPlanJobData,
-): Promise<PiRunnerJobSummary> {
-  const job = await queue.add(piRunnerPlanJobName, data, {
-    jobId: createPiRunnerPlanJobId(data.runId),
-  });
-
-  return summarizePiRunnerJob(job, "waiting");
-}
-
-export async function getPiRunnerJobSummary(
-  queue: PiRunnerQueue,
-  jobId: string,
-): Promise<PiRunnerJobSummary | null> {
-  const job = await queue.getJob(jobId);
-
-  if (!job) {
-    return null;
-  }
-
-  return summarizePiRunnerJob(job, await job.getState());
-}
-
 export async function enqueueGradingPlanJob(
   queue: Queue,
   data: GradingPlanJobData,
@@ -673,39 +532,6 @@ export async function enqueueGradingExternalJob(
 ): Promise<Job<GradingExternalJobData, GradingExternalJobResult>> {
   const jobId = createGradingExternalJobId(data.runAId, data.runBId);
   return queue.add(GRADING_EXTERNAL_JOB_NAME, data, { ...opts, jobId });
-}
-
-export async function enqueuePiRunnerImplJob(
-  queue: Queue,
-  data: PiRunnerImplJobData,
-  opts?: JobsOptions,
-): Promise<Job<PiRunnerImplJobData, PiRunnerImplJobResult>> {
-  const jobId = createPiRunnerImplJobId(data.runId);
-  return queue.add(PI_RUNNER_IMPL_JOB_NAME, data, { ...opts, jobId });
-}
-
-export async function enqueueReproductionValidatorJob(
-  queue: ReproductionValidatorQueue,
-  data: ReproductionValidatorJobData,
-): Promise<ReproductionValidatorJobSummary> {
-  const job = await queue.add(reproductionValidatorValidateJobName, data, {
-    jobId: createReproductionValidatorJobId(data.validationAttemptId),
-  });
-
-  return summarizeReproductionValidatorJob(job, "waiting");
-}
-
-export async function getReproductionValidatorJobSummary(
-  queue: ReproductionValidatorQueue,
-  jobId: string,
-): Promise<ReproductionValidatorJobSummary | null> {
-  const job = await queue.getJob(jobId);
-
-  if (!job) {
-    return null;
-  }
-
-  return summarizeReproductionValidatorJob(job, await job.getState());
 }
 
 export type QueueStatus = {
@@ -754,10 +580,6 @@ export function createValidationRunnerJobId(validationAttemptId: string): string
   return `validation-runner-validate-${validationAttemptId}`;
 }
 
-export function createPiRunnerPlanJobId(runId: string): string {
-  return `pi-runner-plan-${runId}`;
-}
-
 export function createGradingPlanJobId(runId: string): string {
   return `grading-plan-${runId}`;
 }
@@ -768,60 +590,6 @@ export function createGradingImplementationJobId(runId: string): string {
 
 export function createGradingExternalJobId(runAId: string, runBId: string): string {
   return `grading-external-${runAId}-${runBId}`;
-}
-
-export function createPiRunnerImplJobId(runId: string): string {
-  return `pi-runner-impl-${runId}`;
-}
-
-export function createReproductionValidatorJobId(validationAttemptId: string): string {
-  return `reproduction-validator-${validationAttemptId}`;
-}
-
-export function createReproductionValidatorProgress(
-  stage: ReproductionValidatorJobStage,
-  message: string,
-): ReproductionValidatorJobProgress {
-  return {
-    stage,
-    message,
-    at: new Date().toISOString(),
-  };
-}
-
-export async function summarizeReproductionValidatorJob(
-  job: Job<ReproductionValidatorJobData, ReproductionValidatorJobResult>,
-  state?: string,
-): Promise<ReproductionValidatorJobSummary> {
-  const id = job.id;
-
-  if (!id) {
-    throw new Error("BullMQ returned a job without an id");
-  }
-
-  const failedReason = job.failedReason;
-  const summary: ReproductionValidatorJobSummary = {
-    id,
-    name: job.name,
-    queueName: reproductionValidatorQueueName,
-    state: state ?? (await job.getState()),
-    progress: job.progress,
-    attemptsMade: job.attemptsMade,
-    createdAt: toIso(job.timestamp),
-    processedAt: toIso(job.processedOn),
-    finishedAt: toIso(job.finishedOn),
-    data: job.data,
-  };
-
-  if (failedReason) {
-    summary.failedReason = failedReason;
-  }
-
-  if (job.returnvalue !== undefined) {
-    summary.returnvalue = job.returnvalue;
-  }
-
-  return summary;
 }
 
 export function createCaseBuilderProgress(
@@ -839,17 +607,6 @@ export function createValidationRunnerProgress(
   stage: ValidationRunnerJobStage,
   message: string,
 ): ValidationRunnerJobProgress {
-  return {
-    stage,
-    message,
-    at: new Date().toISOString(),
-  };
-}
-
-export function createPiRunnerProgress(
-  stage: PiRunnerJobStage,
-  message: string,
-): PiRunnerJobProgress {
   return {
     stage,
     message,
@@ -928,41 +685,6 @@ export async function summarizeValidationRunnerJob(
   return summary;
 }
 
-export async function summarizePiRunnerJob(
-  job: Job<PiRunnerPlanJobData, PiRunnerPlanJobResult>,
-  state?: string,
-): Promise<PiRunnerJobSummary> {
-  const id = job.id;
-
-  if (!id) {
-    throw new Error("BullMQ returned a job without an id");
-  }
-
-  const failedReason = job.failedReason;
-  const summary: PiRunnerJobSummary = {
-    id,
-    name: job.name,
-    queueName: piRunnerQueueName,
-    state: state ?? (await job.getState()),
-    progress: job.progress,
-    attemptsMade: job.attemptsMade,
-    createdAt: toIso(job.timestamp),
-    processedAt: toIso(job.processedOn),
-    finishedAt: toIso(job.finishedOn),
-    data: job.data,
-  };
-
-  if (failedReason) {
-    summary.failedReason = failedReason;
-  }
-
-  if (job.returnvalue !== undefined) {
-    summary.returnvalue = job.returnvalue;
-  }
-
-  return summary;
-}
-
 function defaultCaseBuilderJobOptions(): JobsOptions {
   return {
     attempts: 3,
@@ -984,14 +706,6 @@ function defaultValidationRunnerJobOptions(): JobsOptions {
 }
 
 function defaultPiRunnerJobOptions(): JobsOptions {
-  return {
-    attempts: 1,
-    removeOnComplete: false,
-    removeOnFail: false,
-  };
-}
-
-function defaultReproductionValidatorJobOptions(): JobsOptions {
   return {
     attempts: 1,
     removeOnComplete: false,

@@ -1,9 +1,23 @@
-import { createBenchmarkRuntime, runSandboxPiAgent, shellQuote, type RuntimeProvider, type RuntimeWorkspace } from "@pilab/runtime";
+import {
+  addWorktree,
+  bootstrapSharedRepo,
+  buildPeerSystemPrompt,
+  createBenchmarkRuntime,
+  createEventStream,
+  createFollowUpInbox,
+  isTurnCompleteEvent,
+  mapPiSdkEvent,
+  runSandboxPiAgent,
+  writeSeedFile,
+  type AgentInbox,
+  type AppendEventBody,
+  type EventStream,
+  type RuntimeProvider,
+  type RuntimeWorkspace,
+  type RunUpdateBody,
+} from "@pilab/runtime";
 
-export type AgentInbox = {
-  appendFollowUp(text: string): Promise<void>;
-  sendDone(): Promise<void>;
-};
+export type { AgentInbox } from "@pilab/runtime";
 
 type AgentHandle = {
   result: AgentRunResult;
@@ -26,6 +40,9 @@ const PLAYGROUND_TOOLS = ["read", "write", "edit", "grep", "find", "ls", "bash"]
 const PLAYGROUND_ROOT = "/home/user/playground";
 const BASE_PORT = 30000;
 
+const PLAYGROUND_EVENTS_PATH = "/playground/:sessionId/events";
+const PLAYGROUND_RUN_UPDATE_PATH = "/playground/:sessionId/runs/:agentRunId";
+
 function sanitizeTools(tools: string[] | undefined): string[] {
   if (!tools || tools.length === 0) return PLAYGROUND_TOOLS;
   const filtered = tools.filter((t) => PLAYGROUND_TOOLS.includes(t) || t === "network");
@@ -44,34 +61,6 @@ export type AgentRunResult = {
   appUrl: string | null;
   output: string;
   errorMessage?: string;
-};
-
-type AppendEventBody = {
-  agentRunId: string;
-  seq: number;
-  kind:
-    | "status"
-    | "assistant_text_delta"
-    | "tool_call_started"
-    | "tool_call_delta"
-    | "tool_call_finished"
-    | "port_open"
-    | "url_resolved"
-    | "error"
-    | "user_follow_up"
-    | "turn_complete";
-  payload?: Record<string, unknown>;
-};
-
-type RunUpdateBody = {
-  status?: "queued" | "preparing" | "running" | "succeeded" | "failed";
-  sandboxId?: string;
-  appUrl?: string;
-  output?: string;
-  startedAt?: string;
-  finishedAt?: string;
-  fileCount?: number;
-  loc?: number;
 };
 
 async function pollForListeningPort(
@@ -195,15 +184,31 @@ export async function runPlaygroundSession(input: {
     const sandboxId = sandbox.id;
     console.log(`[playground-runner] session ${sessionId.slice(0, 8)} sandbox=${sandboxId} agents=${agentRuns.length}`);
 
+    // One EventStream per agent — shared between initial broadcast and per-agent loop
+    // so the seq counter stays monotonic for downstream consumers.
+    const streams = new Map<string, EventStream>(
+      agentRuns.map((spec) => [
+        spec.agentRunId,
+        createEventStream({
+          apiBaseUrl,
+          eventsPath: PLAYGROUND_EVENTS_PATH,
+          runUpdatePath: PLAYGROUND_RUN_UPDATE_PATH,
+          sessionId,
+          agentRunId: spec.agentRunId,
+          loggerTag: "playground-runner",
+        }),
+      ]),
+    );
     // Broadcast initial status to every agent.
     await Promise.all(
       agentRuns.map(async (spec) => {
-        await postRunUpdate({ apiBaseUrl, sessionId, agentRunId: spec.agentRunId }, {
+        const stream = streams.get(spec.agentRunId)!;
+        await stream.postRunUpdate({
           status: "preparing",
           sandboxId,
           startedAt: new Date().toISOString(),
         });
-        await postEvent({ apiBaseUrl, sessionId, agentRunId: spec.agentRunId }, { kind: "status", payload: { status: "preparing", sandboxId } }, 1);
+        await stream.postEvent("status", { status: "preparing", sandboxId });
       }),
     );
 
@@ -214,22 +219,13 @@ export async function runPlaygroundSession(input: {
     }
 
     // Bootstrap a shared git repo, then add one worktree per agent on its own branch.
-    const bootstrap = await sandbox.run({
-      command: [
-        `mkdir -p ${PLAYGROUND_ROOT}`,
-        `cd ${PLAYGROUND_ROOT}`,
-        `git init -q`,
-        `git config user.email playground@pilab`,
-        `git config user.name playground`,
-        `echo "# playground session ${sessionId}" > README.md`,
-        `git add README.md`,
-        `git commit -q -m init`,
-      ].join(" && "),
-      timeoutMs: 30_000,
+    await bootstrapSharedRepo({
+      workspace: sandbox,
+      root: PLAYGROUND_ROOT,
+      description: `playground session ${sessionId}`,
+      userEmail: "playground@pilab",
+      userName: "playground",
     });
-    if (bootstrap.exitCode !== 0) {
-      throw new Error(`Git bootstrap failed: ${bootstrap.stderr || bootstrap.stdout}`);
-    }
 
     const worktreePlans = agentRuns.map((spec, index) => {
       const branch = `agent-${index}`;
@@ -240,25 +236,25 @@ export async function runPlaygroundSession(input: {
     });
 
     for (const plan of worktreePlans) {
-      const wt = await sandbox.run({
-        command: `git -C ${PLAYGROUND_ROOT} worktree add -q -b ${plan.branch} ${plan.worktreePath} HEAD`,
-        timeoutMs: 30_000,
+      await addWorktree({
+        workspace: sandbox,
+        root: PLAYGROUND_ROOT,
+        branch: plan.branch,
+        worktreePath: plan.worktreePath,
       });
-      if (wt.exitCode !== 0) {
-        throw new Error(`worktree add for ${plan.branch} failed: ${wt.stderr || wt.stdout}`);
-      }
 
       // If the user supplied a seed prompt, drop it into each worktree as SEED.md
       // before the agent starts so its first read pass picks it up.
       if (seedPromptText && seedPromptText.trim().length > 0) {
-        const encoded = Buffer.from(seedPromptText, "utf8").toString("base64");
-        const seed = await sandbox.run({
-          command: `echo '${encoded}' | base64 -d > ${plan.worktreePath}/SEED.md`,
-          timeoutMs: 15_000,
-        });
-        if (seed.exitCode !== 0) {
+        try {
+          await writeSeedFile({
+            workspace: sandbox,
+            worktreePath: plan.worktreePath,
+            seedText: seedPromptText,
+          });
+        } catch (err) {
           console.warn(
-            `[playground-runner] failed to write SEED.md for ${plan.branch}: ${seed.stderr || seed.stdout}`,
+            `[playground-runner] failed to write SEED.md for ${plan.branch}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
@@ -271,8 +267,7 @@ export async function runPlaygroundSession(input: {
     const handles = await Promise.all(
       worktreePlans.map((plan) =>
         runPlaygroundAgent({
-          apiBaseUrl,
-          sessionId,
+          stream: streams.get(plan.spec.agentRunId)!,
           sandbox: sandbox!,
           prompt,
           spec: plan.spec,
@@ -346,8 +341,7 @@ export async function runPlaygroundSession(input: {
 // ── Per-agent helper ────────────────────────────────────────────────────────
 
 async function runPlaygroundAgent(input: {
-  apiBaseUrl: string;
-  sessionId: string;
+  stream: EventStream;
   sandbox: RuntimeWorkspace;
   prompt: string;
   spec: AgentRunSpec;
@@ -366,18 +360,16 @@ async function runPlaygroundAgent(input: {
   registerAgentSignal?: (agentRunId: string, abort: () => void) => () => void;
 }): Promise<AgentHandle> {
   const {
-    apiBaseUrl, sessionId, sandbox, prompt,
+    stream, sandbox, prompt,
     spec, index, totalAgents, peers,
     worktreePath, branch, assignedPort, appUrl,
     apiKey, maxWallClockSeconds, signal,
     tools, hasSeed, registerAgentSignal,
   } = input;
 
-  const ctx = { apiBaseUrl, sessionId, agentRunId: spec.agentRunId };
-  let seq = 1;
-  const nextSeq = () => ++seq;
   const textChunks: string[] = [];
   const followUpInboxPath = `${worktreePath}/.pilab-followups.jsonl`;
+  const inbox = createFollowUpInbox({ workspace: sandbox, inboxPath: followUpInboxPath });
 
   // Local AbortController chained off the session signal so cancel-run can target one agent.
   const localController = new AbortController();
@@ -385,30 +377,8 @@ async function runPlaygroundAgent(input: {
   signal.addEventListener("abort", abortLocal, { once: true });
   const unregister = registerAgentSignal?.(spec.agentRunId, abortLocal) ?? (() => undefined);
 
-  const event = async (kind: AppendEventBody["kind"], payload: Record<string, unknown>) => {
-    await postEvent(ctx, { kind, payload }, nextSeq());
-  };
-
-  // Inbox file lives next to the worktree. The runtime pre-creates it.
-  // appendFollowUp writes a JSONL line; sendDone writes the {done:true} sentinel.
-  const inbox: AgentInbox = {
-    async appendFollowUp(text: string) {
-      const line = JSON.stringify({ text });
-      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
-      await sandbox.run({
-        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
-        timeoutMs: 5_000,
-      });
-    },
-    async sendDone() {
-      const line = JSON.stringify({ done: true });
-      const encoded = Buffer.from(line + "\n", "utf8").toString("base64");
-      await sandbox.run({
-        command: `printf '%s' ${shellQuote(encoded)} | base64 -d >> ${shellQuote(followUpInboxPath)}`,
-        timeoutMs: 5_000,
-      });
-    },
-  };
+  const event = (kind: AppendEventBody["kind"], payload: Record<string, unknown>) =>
+    stream.postEvent(kind, payload);
 
   let firstTurnResolve!: (value: AgentRunResult) => void;
   let firstTurnReject!: (err: Error) => void;
@@ -431,14 +401,15 @@ async function runPlaygroundAgent(input: {
       const stats = await snapshotWorktreeStats(sandbox, worktreePath);
       await event("turn_complete", { turn });
       const output = textChunks.join("");
-      await postRunUpdate(ctx, {
+      const update: RunUpdateBody = {
         status: "succeeded",
         output,
-        ...(resolvedUrl ? { appUrl: resolvedUrl } : {}),
-        ...(stats.fileCount != null ? { fileCount: stats.fileCount } : {}),
-        ...(stats.loc != null ? { loc: stats.loc } : {}),
         finishedAt: new Date().toISOString(),
-      });
+      };
+      if (resolvedUrl) update.appUrl = resolvedUrl;
+      if (stats.fileCount != null) update.fileCount = stats.fileCount;
+      if (stats.loc != null) update.loc = stats.loc;
+      await stream.postRunUpdate(update);
       if (!firstTurnDone) {
         firstTurnDone = true;
         firstTurnResolve({
@@ -461,9 +432,10 @@ async function runPlaygroundAgent(input: {
       assignedPort,
       appUrl,
     });
-    await postRunUpdate(ctx, { status: "running" });
+    await stream.postRunUpdate({ status: "running" });
 
-    const systemPrompt = buildSystemPrompt({
+    const systemPrompt = buildPeerSystemPrompt({
+      role: "playground_agent",
       modelName: spec.modelName,
       agentIndex: index,
       totalAgents,
@@ -496,10 +468,10 @@ async function runPlaygroundAgent(input: {
           turnInFlight = turnInFlight.then(() => handleTurnComplete(turn));
           return;
         }
-        const mapped = mapPiSdkEventToPlayground(sdkEvent);
+        const mapped = mapPiSdkEvent(sdkEvent);
         if (!mapped) return;
         if (mapped.textDelta) textChunks.push(mapped.textDelta);
-        void postEvent(ctx, { kind: mapped.kind, payload: mapped.payload }, nextSeq());
+        void stream.postEvent(mapped.kind, mapped.payload);
       },
     }).catch(async (err: unknown) => {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -509,7 +481,7 @@ async function runPlaygroundAgent(input: {
         try {
           await event("error", { error: errorMessage });
           const output = textChunks.join("");
-          await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+          await stream.postRunUpdate({ status: "failed", output, finishedAt: new Date().toISOString() });
         } finally {
           firstTurnDone = true;
           const cancelled = localController.signal.aborted && !signal.aborted;
@@ -550,7 +522,7 @@ async function runPlaygroundAgent(input: {
     const output = textChunks.join("");
     try { await event("error", { error: errorMessage }); } catch { /* ignore */ }
     try {
-      await postRunUpdate(ctx, { status: "failed", output, finishedAt: new Date().toISOString() });
+      await stream.postRunUpdate({ status: "failed", output, finishedAt: new Date().toISOString() });
     } catch { /* ignore */ }
     return {
       result: {
@@ -564,171 +536,4 @@ async function runPlaygroundAgent(input: {
       scriptDone: Promise.resolve(),
     };
   }
-}
-
-function isTurnCompleteEvent(value: unknown): value is { type: "pilab_turn_complete"; turn?: number; status?: string; message?: string } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as Record<string, unknown>).type === "pilab_turn_complete"
-  );
-}
-
-// ── System prompt builder ───────────────────────────────────────────────────
-
-function buildSystemPrompt(env: {
-  modelName: string;
-  agentIndex: number;
-  totalAgents: number;
-  peers: string[];
-  worktreePath: string;
-  branch: string;
-  assignedPort: number;
-  appUrl: string;
-  hasSeed?: boolean;
-}): string {
-  const peerLine = env.peers.length > 0
-    ? `Competing agents in this session: ${env.peers.join(", ")}.`
-    : `You are the only agent in this session.`;
-  const seedLine = env.hasSeed
-    ? `\nThere is a SEED.md file in your working directory that contains starter context for this task. Read it first before doing anything else.\n`
-    : "";
-
-  return [
-    `You are agent ${env.agentIndex + 1} of ${env.totalAgents} (${env.modelName}) in a head-to-head playground session. ${peerLine}`,
-    seedLine,
-    `# Environment`,
-    `You are running inside a shared E2B Linux sandbox with Python 3 and Node.js available. You share this sandbox with the other agents above.`,
-    ``,
-    `- Your working directory: ${env.worktreePath} (git branch \`${env.branch}\`)`,
-    `- Only read, write, edit, or \`cd\` inside this directory. Do NOT touch any path outside it — those belong to other agents.`,
-    `- Your assigned port: ${env.assignedPort}. If your task involves a web server, bind to **0.0.0.0:${env.assignedPort}** exclusively. Other agents have different ports.`,
-    `- Your app's public URL when listening on that port: ${env.appUrl}`,
-    ``,
-    `# Tools`,
-    `You have tools to read, write, and edit files, and to run bash commands. Stay inside ${env.worktreePath}.`,
-    ``,
-    `# Goals`,
-    `- Build a complete, working application that satisfies the user's prompt.`,
-    `- Prefer a small set of files in a single directory. Use whatever stack fits the task.`,
-    `- If you start a web server, bind to **0.0.0.0:${env.assignedPort}** and leave it running so the human grader can open ${env.appUrl}.`,
-    `- Start the server in the background (e.g. \`nohup python3 app.py > server.log 2>&1 &\`), then **verify it is actually listening** with \`curl -fsS http://127.0.0.1:${env.assignedPort}/ -o /dev/null && echo LISTENING\` before writing your FINAL message. If curl fails, fix the server first.`,
-    `- When you are done, write a final message starting with **"FINAL:"** that summarizes what you built, how to run it, and (if it's a server) includes the public URL ${env.appUrl}.`,
-  ].join("\n");
-}
-
-// ── API helpers (shared by orchestrator + per-agent code) ───────────────────
-
-type ApiCtx = { apiBaseUrl: string; sessionId: string; agentRunId: string };
-
-async function postEvent(
-  ctx: ApiCtx,
-  { kind, payload }: { kind: AppendEventBody["kind"]; payload: Record<string, unknown> },
-  seq: number,
-) {
-  const body: AppendEventBody = { agentRunId: ctx.agentRunId, seq, kind, payload };
-  try {
-    const res = await fetch(`${ctx.apiBaseUrl}/playground/${ctx.sessionId}/events`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.error(`[playground-runner] event POST failed (${res.status}): ${await res.text()}`);
-    }
-  } catch (err) {
-    console.error(`[playground-runner] event POST error:`, err);
-  }
-}
-
-async function postRunUpdate(ctx: ApiCtx, body: RunUpdateBody) {
-  try {
-    const res = await fetch(`${ctx.apiBaseUrl}/playground/${ctx.sessionId}/runs/${ctx.agentRunId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.error(`[playground-runner] run update failed (${res.status}): ${await res.text()}`);
-    }
-  } catch (err) {
-    console.error(`[playground-runner] run update error:`, err);
-  }
-}
-
-// ── Pi SDK → playground event mapping ───────────────────────────────────────
-
-type MappedEvent = {
-  kind: AppendEventBody["kind"];
-  payload: Record<string, unknown>;
-  textDelta?: string;
-};
-
-function mapPiSdkEventToPlayground(event: unknown): MappedEvent | null {
-  if (!isRecord(event)) return null;
-  const type = stringValue(event.type);
-
-  if (type === "message_update" && isRecord(event.assistantMessageEvent)) {
-    const inner = event.assistantMessageEvent;
-    const innerType = stringValue(inner.type);
-
-    if (innerType === "text_delta") {
-      const delta = stringValue(inner.delta) ?? "";
-      if (!delta) return null;
-      return { kind: "assistant_text_delta", payload: { delta }, textDelta: delta };
-    }
-    return null;
-  }
-
-  if (type === "tool_execution_start") {
-    return {
-      kind: "tool_call_started",
-      payload: scrub({
-        toolName: stringValue(event.toolName) ?? "unknown",
-        toolCallId: stringValue(event.toolCallId),
-        arguments: event.args ?? event.arguments,
-      }),
-    };
-  }
-  if (type === "tool_execution_update") {
-    return {
-      kind: "tool_call_delta",
-      payload: scrub({
-        toolName: stringValue(event.toolName),
-        toolCallId: stringValue(event.toolCallId),
-        partialResult: event.partialResult,
-      }),
-    };
-  }
-  if (type === "tool_execution_end") {
-    return {
-      kind: "tool_call_finished",
-      payload: scrub({
-        toolName: stringValue(event.toolName) ?? "unknown",
-        toolCallId: stringValue(event.toolCallId),
-        result: event.result,
-        isError: Boolean(event.isError),
-      }),
-    };
-  }
-
-  // Drop every other lifecycle event (agent_*, turn_*, message_start/end,
-  // queue_update, compaction_*, auto_retry_*, session_info_changed, etc.).
-  return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
-}
-
-function scrub(payload: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(payload)) {
-    if (v !== undefined) out[k] = v;
-  }
-  return out;
 }

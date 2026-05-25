@@ -106,6 +106,7 @@ function createCaseVersion(data: CaseBuilderPrepareJobData): CaseVersionRow {
     promptVersions: {},
     testBuilderModelId: null,
     validationRunnerVersion: null,
+    evaluatorStrategy: null,
     metadata: {},
     createdAt: new Date("2026-05-01T00:00:00.000Z"),
     frozenAt: null,

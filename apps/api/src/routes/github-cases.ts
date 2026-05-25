@@ -6,7 +6,6 @@ import {
   caseVersions,
   githubIssues,
   githubPullRequests,
-  reproductionSteps,
   runs,
   testSpecs,
   validationAttempts,
@@ -456,21 +455,12 @@ type ValidationAttemptSummary = {
   acceptedTestCount: number;
   rejectedTestCount: number;
   runnerVersion: string;
+  baseLogArtifactId: string | null;
+  goldLogArtifactId: string | null;
+  candidateTestsArtifactId: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
-};
-
-type ReproductionStepSummary = {
-  id: string;
-  validationAttemptId: string | null;
-  steps: { description: string; command: string }[];
-  script: string;
-  rationale: string | null;
-  status: string;
-  reproducedOnBase: boolean | null;
-  fixedOnGold: boolean | null;
-  createdAt: string;
 };
 
 type CaseVersionDetail = {
@@ -478,6 +468,7 @@ type CaseVersionDetail = {
   caseId: string;
   version: number;
   status: string;
+  evaluatorStrategy: string | null;
   repoOwner: string;
   repoName: string;
   baseCommitSha: string;
@@ -488,24 +479,7 @@ type CaseVersionDetail = {
   frozenAt: string | null;
   testSpecs: TestSpecSummary[];
   validationAttempts: ValidationAttemptSummary[];
-  reproductionSteps: ReproductionStepSummary[];
 };
-
-function toReproductionStepSummary(
-  row: typeof reproductionSteps.$inferSelect,
-): ReproductionStepSummary {
-  return {
-    id: row.id,
-    validationAttemptId: row.validationAttemptId ?? null,
-    steps: row.steps,
-    script: row.script,
-    rationale: row.rationale ?? null,
-    status: row.status,
-    reproducedOnBase: row.reproducedOnBase ?? null,
-    fixedOnGold: row.fixedOnGold ?? null,
-    createdAt: row.createdAt.toISOString(),
-  };
-}
 
 function toTestSpecSummary(row: typeof testSpecs.$inferSelect): TestSpecSummary {
   return {
@@ -534,6 +508,9 @@ function toValidationAttemptSummary(
     acceptedTestCount: row.acceptedTestCount,
     rejectedTestCount: row.rejectedTestCount,
     runnerVersion: row.runnerVersion,
+    baseLogArtifactId: row.baseLogArtifactId ?? null,
+    goldLogArtifactId: row.goldLogArtifactId ?? null,
+    candidateTestsArtifactId: row.candidateTestsArtifactId ?? null,
     createdAt: row.createdAt.toISOString(),
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
     finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
@@ -1361,7 +1338,6 @@ export const githubCaseRoutes: FastifyPluginAsync = async (fastify) => {
         with: {
           testSpecs: true,
           validationAttempts: true,
-          reproductionSteps: true,
         },
       });
 
@@ -1375,6 +1351,7 @@ export const githubCaseRoutes: FastifyPluginAsync = async (fastify) => {
         caseId: version.caseId,
         version: version.version,
         status: version.status,
+        evaluatorStrategy: version.evaluatorStrategy ?? null,
         repoOwner: version.repoOwner,
         repoName: version.repoName,
         baseCommitSha: version.baseCommitSha,
@@ -1385,7 +1362,6 @@ export const githubCaseRoutes: FastifyPluginAsync = async (fastify) => {
         frozenAt: version.frozenAt ? version.frozenAt.toISOString() : null,
         testSpecs: version.testSpecs.map(toTestSpecSummary),
         validationAttempts: version.validationAttempts.map(toValidationAttemptSummary),
-        reproductionSteps: version.reproductionSteps.map(toReproductionStepSummary),
       };
     },
   );

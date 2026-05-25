@@ -21,10 +21,9 @@ import type { DbClient } from "@pilab/db";
 import { createApiObjectStore } from "../object-store.js";
 import {
   createPiRunnerQueue,
-  createPiRunnerPlanJobId,
   createRedisConnection,
-  enqueuePiRunnerPlanJob,
-  enqueuePiRunnerImplJob,
+  enqueueBenchmarkBatchJob,
+  type BenchmarkBatchAgentSpec,
   createGradingExternalQueue,
   enqueueGradingExternalJob,
 } from "@pilab/jobs";
@@ -404,8 +403,41 @@ export const benchmarkRoutes: FastifyPluginAsync = async (fastify) => {
         .from(runGroups)
         .where(eq(runGroups.experimentId, experiment.id));
 
+      // Look up the dataset for the flat fields the web detail page consumes.
+      const [datasetRow] = experiment.datasetId
+        ? await db
+            .select({ slug: datasets.slug, name: datasets.name })
+            .from(datasets)
+            .where(eq(datasets.id, experiment.datasetId))
+            .limit(1)
+        : [];
+
+      // Web page (apps/web/app/benchmarks/[id]/page.tsx) expects flat
+      // BenchmarkExperiment fields alongside the nested detail data.
+      const flatCompletedRuns = runRows.filter((r) => r.status === "succeeded").length;
+      const flatFailedRuns = runRows.filter((r) => r.status === "failed" || r.status === "timed_out").length;
+      const agentModelIds = agentConfigRows.map((a) => a.modelId);
+
       reply.code(200);
       return {
+        // ── Flat shape used by the live web detail page ──
+        id: experiment.id,
+        name: experiment.name,
+        datasetSlug: datasetRow?.slug ?? "",
+        datasetName: datasetRow?.name ?? null,
+        status: experiment.status,
+        agent1ModelId: agentModelIds[0] ?? "",
+        agent1Mode: agentConfigRows[0]?.mode ?? experiment.mode,
+        agent2ModelId: agentModelIds[1] ?? null,
+        agent2Mode: agentConfigRows[1]?.mode ?? null,
+        totalCases: caseVersionRows.length,
+        totalRuns: runRows.length,
+        completedRuns: flatCompletedRuns,
+        failedRuns: flatFailedRuns,
+        createdAt: experiment.createdAt.toISOString(),
+        startedAt: experiment.startedAt?.toISOString() ?? null,
+        finishedAt: experiment.finishedAt?.toISOString() ?? null,
+        // ── Nested detail kept for richer consumers ──
         experiment: {
           id: experiment.id,
           name: experiment.name,
@@ -544,21 +576,32 @@ export const benchmarkRoutes: FastifyPluginAsync = async (fastify) => {
 
       let runCount = 0;
 
-      // For each experiment_case_versions × experiment_agent_configs combination
+      // One benchmark-batch job per case_version. All agent configs for the
+      // experiment share one E2B sandbox + worktrees inside the runner, so we
+      // batch them together here instead of enqueuing one job per (case ×
+      // agent) pair.
       for (const ecv of expCaseVersions) {
-        const { issueTitle, issueBody } = await loadIssueContent(db, ecv.caseVersionId);
+        const agentSpecs: BenchmarkBatchAgentSpec[] = [];
+        let maxBatchWallClock = 0;
 
-        // Find the agent config row to get modelId and other settings
         for (const eac of expAgentConfigs) {
           const [agentConfig] = await db
             .select()
             .from(agentConfigs)
             .where(eq(agentConfigs.id, eac.agentConfigId))
             .limit(1);
-
           if (!agentConfig) continue;
 
-          // Create run_group
+          const settings = (agentConfig.modelSettings as JsonRecord) ?? {};
+          const modelId = String(settings["modelId"] ?? "unknown");
+          const modelName = String(
+            settings["modelName"] ?? agentConfig.name ?? modelId,
+          );
+          const maxWallClockSeconds = Number(
+            settings["maxWallClockSeconds"] ?? 900,
+          );
+          maxBatchWallClock = Math.max(maxBatchWallClock, maxWallClockSeconds);
+
           const [runGroup] = await db
             .insert(runGroups)
             .values({
@@ -568,21 +611,8 @@ export const benchmarkRoutes: FastifyPluginAsync = async (fastify) => {
               status: "queued",
             })
             .returning();
-
           if (!runGroup) continue;
 
-          const modelId =
-            (agentConfig.modelSettings as JsonRecord)?.["modelId"] ??
-            "unknown";
-          const agentMode = agentConfig.mode;
-          const maxTurns =
-            (agentConfig.modelSettings as JsonRecord)?.["maxTurns"] ?? 8;
-          const maxWallClockSeconds =
-            (agentConfig.modelSettings as JsonRecord)?.[
-              "maxWallClockSeconds"
-            ] ?? 300;
-
-          // Create run
           const [run] = await db
             .insert(runs)
             .values({
@@ -590,105 +620,33 @@ export const benchmarkRoutes: FastifyPluginAsync = async (fastify) => {
               runGroupId: runGroup.id,
               caseVersionId: ecv.caseVersionId,
               agentConfigId: eac.agentConfigId,
-              mode: agentMode,
+              mode: agentConfig.mode,
               status: "queued",
-              openRouterModelId: String(modelId),
+              openRouterModelId: modelId,
               providerRoutingConfig: {},
               fallbackPolicy: { enabled: false },
             })
             .returning();
-
           if (!run) continue;
 
+          agentSpecs.push({
+            runId: run.id,
+            modelId,
+            modelName,
+            maxWallClockSeconds,
+          });
           runCount++;
-
-          // Enqueue pi-runner job based on mode
-          const enqueuedAt = new Date().toISOString();
-
-          if (agentMode === "plan_only" || experiment.mode === "plan_only") {
-            await enqueuePiRunnerPlanJob(piRunnerQueue, {
-              runId: run.id,
-              caseVersionId: ecv.caseVersionId,
-              workspacePath:
-                process.env.PI_RUNNER_WORKSPACE_PATH ?? process.cwd(),
-              modelId: String(modelId),
-              prompt: buildDefaultPlanPrompt({
-                caseVersionId: ecv.caseVersionId,
-                issueTitle,
-                issueBody,
-              }),
-              maxTurns: Number(maxTurns),
-              maxWallClockSeconds: Number(maxWallClockSeconds),
-              enqueuedAt,
-            });
-          } else if (agentMode === "end_to_end" || experiment.mode === "end_to_end") {
-            // Enqueue plan job
-            await enqueuePiRunnerPlanJob(piRunnerQueue, {
-              runId: run.id,
-              caseVersionId: ecv.caseVersionId,
-              workspacePath:
-                process.env.PI_RUNNER_WORKSPACE_PATH ?? process.cwd(),
-              modelId: String(modelId),
-              prompt: buildDefaultPlanPrompt({
-                caseVersionId: ecv.caseVersionId,
-                issueTitle,
-                issueBody,
-              }),
-              maxTurns: Number(maxTurns),
-              maxWallClockSeconds: Number(maxWallClockSeconds),
-              enqueuedAt,
-            });
-
-            // Also create impl run and enqueue impl job upfront.
-            // The impl worker polls for plan readiness before proceeding.
-            const [implRun] = await db
-              .insert(runs)
-              .values({
-                experimentId: experiment.id,
-                runGroupId: runGroup.id,
-                parentRunId: run.id,
-                caseVersionId: ecv.caseVersionId,
-                agentConfigId: eac.agentConfigId,
-                mode: "implementation_only",
-                status: "queued",
-                openRouterModelId: String(modelId),
-                providerRoutingConfig: {},
-                fallbackPolicy: { enabled: false },
-              })
-              .returning();
-
-            if (implRun) {
-              await enqueuePiRunnerImplJob(piRunnerQueue, {
-                runId: implRun.id,
-                caseVersionId: ecv.caseVersionId,
-                planRunId: run.id,
-                planArtifactId: "",
-                modelId: String(modelId),
-                maxTurns: Number(maxTurns),
-                maxWallClockSeconds: Number(maxWallClockSeconds),
-              });
-              runCount++;
-            }
-          } else {
-            // For implementation_only, still enqueue plan first
-            // since impl jobs require a plan artifact
-            await enqueuePiRunnerPlanJob(piRunnerQueue, {
-              runId: run.id,
-              caseVersionId: ecv.caseVersionId,
-              workspacePath:
-                process.env.PI_RUNNER_WORKSPACE_PATH ?? process.cwd(),
-              modelId: String(modelId),
-              prompt: buildDefaultPlanPrompt({
-                caseVersionId: ecv.caseVersionId,
-                issueTitle,
-                issueBody,
-              }),
-              maxTurns: Number(maxTurns),
-              maxWallClockSeconds: Number(maxWallClockSeconds),
-              enqueuedAt,
-            });
-          }
         }
+
+        if (agentSpecs.length === 0) continue;
+
+        await enqueueBenchmarkBatchJob(piRunnerQueue, {
+          experimentId: experiment.id,
+          caseVersionId: ecv.caseVersionId,
+          agentRuns: agentSpecs,
+          ...(maxBatchWallClock > 0 ? { maxWallClockSeconds: maxBatchWallClock } : {}),
+          enqueuedAt: new Date().toISOString(),
+        });
       }
 
       // Update experiment status

@@ -17,6 +17,11 @@ import {
   type PlaygroundSandboxImage,
 } from "@pilab/jobs";
 import type { FastifyPluginAsync } from "fastify";
+import {
+  GRADER_OUTPUT_FILENAME,
+  GRADER_SANDBOX_ROOT,
+  runPiJsonGrader,
+} from "@pilab/runtime";
 import type { RunEventBus } from "../event-bus.js";
 
 type PlaygroundRoutesOptions = {
@@ -1276,85 +1281,61 @@ async function gradePlaygroundOutput(input: {
   ux?: number;
   shipIt?: number;
 }> {
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${input.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: input.modelId,
-      messages: [
-        {
-          role: "system",
-          content: `You are evaluating how well an AI coding agent completed a task.
-For the given task and agent output, rate four 1-5 axes:
+  const systemPrompt = [
+    `You are evaluating how well an AI coding agent completed a task.`,
+    `Read TASK.md and OUTPUT.md in your working directory, then rate four 1-5 axes:`,
+    ``,
+    `- correctness: does it satisfy the task requirements?`,
+    `- codeQuality: is the code well-structured and idiomatic?`,
+    `- ux: is the resulting UX / interface polished where applicable?`,
+    `- shipIt: would you ship this as-is?`,
+    ``,
+    `Then compute an overall score (0-100) as a weighted blend (correctness 40%, codeQuality 25%, ux 15%, shipIt 20%, mapped from 1-5 to 0-20 each).`,
+    ``,
+    `Write the final scores to \`${GRADER_SANDBOX_ROOT}/${GRADER_OUTPUT_FILENAME}\` as JSON:`,
+    `{ "score": 0-100, "correctness": 1-5, "codeQuality": 1-5, "ux": 1-5, "shipIt": 1-5, "reasoning": "..." }`,
+    `Then write a FINAL: summary line. Be fair and consistent.`,
+  ].join("\n");
 
-- correctness: does it satisfy the task requirements?
-- code_quality: is the code well-structured and idiomatic?
-- ux: is the resulting UX / interface polished where applicable?
-- ship_it: would you ship this as-is?
+  const userPrompt = `Read TASK.md (the user's task) and OUTPUT.md (the agent's output) from your working directory, then score the agent and write the JSON to ${GRADER_OUTPUT_FILENAME}.`;
 
-Then compute an overall score (0-100) as a weighted blend (correctness 40 %, code_quality 25 %, ux 15 %, ship_it 20 %, mapped from 1-5 to 0-20 each).
-
-Be fair and consistent. Return JSON exactly: { "score": number, "correctness": int, "code_quality": int, "ux": int, "ship_it": int, "reasoning": string }`,
-        },
-        {
-          role: "user",
-          content: `Task: ${input.prompt}\n\nAgent (${input.modelName}) Output:\n${input.output}`,
-        },
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "playground_grade",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: {
-              score: { type: "number" },
-              correctness: { type: "integer", minimum: 1, maximum: 5 },
-              code_quality: { type: "integer", minimum: 1, maximum: 5 },
-              ux: { type: "integer", minimum: 1, maximum: 5 },
-              ship_it: { type: "integer", minimum: 1, maximum: 5 },
-              reasoning: { type: "string" },
-            },
-            required: ["score", "correctness", "code_quality", "ux", "ship_it", "reasoning"],
-            additionalProperties: false,
-          },
-        },
-      },
-      temperature: 0,
-    }),
+  const parsed = await runPiJsonGrader<{
+    score?: number;
+    correctness?: number;
+    codeQuality?: number;
+    ux?: number;
+    shipIt?: number;
+    reasoning?: string;
+  }>({
+    jobTag: "playground",
+    apiKey: input.apiKey,
+    modelId: input.modelId,
+    systemPrompt,
+    userPrompt,
+    contextFiles: [
+      { name: "TASK.md", content: input.prompt },
+      { name: "OUTPUT.md", content: `# Agent: ${input.modelName}\n\n${input.output}` },
+    ],
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Grader API error: ${text.slice(0, 500)}`);
+  if (typeof parsed.score !== "number") {
+    throw new Error(`Playground grader output missing numeric "score"`);
   }
 
-  const data = (await response.json()) as {
-    choices: Array<{ message: { content: string } }>;
-  };
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error("No content in grader response");
-
-  const parsed = JSON.parse(content) as {
+  const result: {
     score: number;
-    correctness?: number;
-    code_quality?: number;
-    ux?: number;
-    ship_it?: number;
     reasoning: string;
-  };
-  const result: ReturnType<typeof gradePlaygroundOutput> extends Promise<infer T> ? T : never = {
+    correctness?: number;
+    codeQuality?: number;
+    ux?: number;
+    shipIt?: number;
+  } = {
     score: parsed.score,
-    reasoning: parsed.reasoning,
+    reasoning: typeof parsed.reasoning === "string" ? parsed.reasoning : "",
   };
   if (typeof parsed.correctness === "number") result.correctness = parsed.correctness;
-  if (typeof parsed.code_quality === "number") result.codeQuality = parsed.code_quality;
+  if (typeof parsed.codeQuality === "number") result.codeQuality = parsed.codeQuality;
   if (typeof parsed.ux === "number") result.ux = parsed.ux;
-  if (typeof parsed.ship_it === "number") result.shipIt = parsed.ship_it;
+  if (typeof parsed.shipIt === "number") result.shipIt = parsed.shipIt;
   return result;
 }
