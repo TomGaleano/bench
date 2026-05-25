@@ -64,15 +64,7 @@ export async function runSandboxPiAgent(input: {
     content: runtimePiAgentScript(),
   });
 
-  const install = await input.workspace.run({
-    command: `npm install --prefix ${shellQuote(runtimeDir)} --no-audit --no-fund --silent`,
-    cwd,
-    timeoutMs: 180_000,
-    env: { CI: "true" },
-  });
-  if (install.exitCode !== 0) {
-    throw new Error(`Failed to install PI agent runtime in sandbox: ${install.stderr || install.stdout}`);
-  }
+  await installPiAgentRuntime(input.workspace, runtimeDir, cwd);
 
   await withTimeout(
     new Promise<void>((resolve, reject) => {
@@ -94,6 +86,65 @@ export async function runSandboxPiAgent(input: {
     }),
     input.timeoutMs,
     input.signal,
+  );
+}
+
+/**
+ * `npm install @mariozechner/pi-coding-agent` pulls in the Anthropic + OpenAI
+ * SDKs plus the pi-* sibling packages — a cold install in a fresh E2B sandbox
+ * over the network can easily exceed 3 minutes. We allow 10 minutes per
+ * attempt and retry once on transient failures (E2B deadline_exceeded, npm
+ * `ERR_SOCKET_TIMEOUT`, registry 5xx, etc.). When all attempts fail we
+ * rethrow with a message that points the user at the underlying cause
+ * instead of dumping the raw E2B error.
+ */
+async function installPiAgentRuntime(
+  workspace: RuntimeWorkspace,
+  runtimeDir: string,
+  cwd: string,
+): Promise<void> {
+  const command = `npm install --prefix ${shellQuote(runtimeDir)} --no-audit --no-fund --prefer-offline --silent`;
+  const installTimeoutMs = 600_000;
+  let lastError = "";
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const result = await workspace.run({
+      command,
+      cwd,
+      timeoutMs: installTimeoutMs,
+      env: { CI: "true" },
+    });
+    if (result.exitCode === 0) return;
+    lastError = result.stderr || result.stdout || `exit ${result.exitCode}`;
+
+    const transient =
+      lastError.includes("deadline_exceeded") ||
+      lastError.includes("ETIMEDOUT") ||
+      lastError.includes("ESOCKETTIMEDOUT") ||
+      lastError.includes("ECONNRESET") ||
+      lastError.includes("ERR_SOCKET_TIMEOUT") ||
+      lastError.includes("registry.npmjs.org") ||
+      /\b5\d{2}\b/.test(lastError);
+
+    if (attempt < 2 && transient) {
+      // Clean the (partial) node_modules so the retry starts from a known
+      // state instead of inheriting half-extracted tarballs.
+      await workspace.run({
+        command: `rm -rf ${shellQuote(`${runtimeDir}/node_modules`)} ${shellQuote(`${runtimeDir}/package-lock.json`)}`,
+        cwd,
+        timeoutMs: 30_000,
+      });
+      continue;
+    }
+    break;
+  }
+
+  const isTimeout = lastError.includes("deadline_exceeded") || lastError.includes("timed out");
+  throw new Error(
+    isTimeout
+      ? `Failed to install PI agent runtime in sandbox: npm install ran past the ${installTimeoutMs / 1000}s cap. ` +
+        `This usually means the npm registry was slow or the sandbox lost network. Last error: ${lastError.slice(0, 400)}`
+      : `Failed to install PI agent runtime in sandbox: ${lastError.slice(0, 600)}`,
   );
 }
 
