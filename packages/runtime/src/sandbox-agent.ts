@@ -98,12 +98,14 @@ export async function runSandboxPiAgent(input: {
  * rethrow with a message that points the user at the underlying cause
  * instead of dumping the raw E2B error.
  */
-async function installPiAgentRuntime(
+export async function installPiAgentRuntime(
   workspace: RuntimeWorkspace,
   runtimeDir: string,
   cwd: string,
 ): Promise<void> {
-  const command = `npm install --prefix ${shellQuote(runtimeDir)} --no-audit --no-fund --prefer-offline --silent`;
+  // `--loglevel=error` keeps stderr signal (so we can classify failures) while
+  // still suppressing the multi-MB progress noise that `--silent` muted.
+  const command = `npm install --prefix ${shellQuote(runtimeDir)} --no-audit --no-fund --prefer-offline --loglevel=error`;
   const installTimeoutMs = 600_000;
   let lastError = "";
 
@@ -117,16 +119,16 @@ async function installPiAgentRuntime(
     if (result.exitCode === 0) return;
     lastError = result.stderr || result.stdout || `exit ${result.exitCode}`;
 
-    const transient =
-      lastError.includes("deadline_exceeded") ||
-      lastError.includes("ETIMEDOUT") ||
-      lastError.includes("ESOCKETTIMEDOUT") ||
-      lastError.includes("ECONNRESET") ||
-      lastError.includes("ERR_SOCKET_TIMEOUT") ||
-      lastError.includes("registry.npmjs.org") ||
-      /\b5\d{2}\b/.test(lastError);
-
-    if (attempt < 2 && transient) {
+    // Always retry once on the first failure. The cost is bounded (one extra
+    // install) and even a "permanent" error like a transient package-version
+    // mismatch in the npm cache can clear on a clean retry. Production
+    // observation: `result.stderr` is often blank because of E2B's exec
+    // wrapper, so we can't gate on a classifier alone — better to give the
+    // second attempt a chance than to fail spuriously.
+    if (attempt < 2) {
+      console.log(
+        `[pi-runtime] install attempt 1 failed (exit ${result.exitCode}); retrying after cleanup. stderr: ${lastError.slice(0, 200)}`,
+      );
       // Clean the (partial) node_modules so the retry starts from a known
       // state instead of inheriting half-extracted tarballs.
       await workspace.run({
