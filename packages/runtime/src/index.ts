@@ -89,6 +89,7 @@ function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
           cwd: commandInput.cwd ?? rootPath,
           ...(commandInput.env ? { envs: commandInput.env } : {}),
           timeoutMs: commandInput.timeoutMs,
+          requestTimeoutMs: commandInput.timeoutMs,
         });
         return {
           exitCode: result.exitCode ?? 0,
@@ -129,6 +130,7 @@ function createE2BWorkspace(sandbox: any): RuntimeWorkspace {
           cwd: commandInput.cwd ?? rootPath,
           ...(commandInput.env ? { envs: commandInput.env } : {}),
           timeoutMs: commandInput.timeoutMs,
+          requestTimeoutMs: commandInput.timeoutMs,
           onStdout(chunk: string) {
             fullStdout += chunk;
             commandInput.onStdout?.(chunk);
@@ -259,7 +261,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export { runSandboxPiAgent, createSandboxEventParser } from "./sandbox-agent.js";
+export { runSandboxPiAgent, createSandboxEventParser, installPiAgentRuntime } from "./sandbox-agent.js";
 export {
   bootstrapSharedRepo,
   bootstrapRepoAtCommit,
