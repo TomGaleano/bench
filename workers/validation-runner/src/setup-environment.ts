@@ -78,6 +78,7 @@ async function analyzeAndInstall(
     let lastError = "";
     let allOk = true;
 
+    const seenCmds = new Set<string>();
     for (const rawCmd of commands) {
       // Sanitize: strip sudo (sandbox runs as root), add pip retries for DNS flakiness
       let cmd = rawCmd
@@ -89,6 +90,22 @@ async function analyzeAndInstall(
         cmd = cmd.replace(/\bpip install\b/g, "pip install --retries 5 --timeout 30")
                  .replace(/\bpip3 install\b/g, "pip3 install --retries 5 --timeout 30");
       }
+      // Belt-and-suspenders: skip frontend builds even if the LLM ignored the
+      // "Python tests only" rule in the prompt. Repos like HKUDS/nanobot ship a
+      // `webui/` Next.js app alongside Python source; `npm ci` + `next build`
+      // OOMs the small E2B sandbox and the retry loop just burns wall-clock.
+      if (isFrontendBuildCommand(cmd)) {
+        console.log(`[setup-agent] skipping frontend-build command (Python tests don't need it): ${cmd.slice(0, 200)}`);
+        continue;
+      }
+      // Refuse to re-run the exact same command twice in the same attempt — if
+      // it failed once it will fail again, and any retry should come from the
+      // diagnosis LLM with a different plan.
+      if (seenCmds.has(cmd)) {
+        console.log(`[setup-agent] skipping duplicate command: ${cmd.slice(0, 200)}`);
+        continue;
+      }
+      seenCmds.add(cmd);
       console.log(`[setup-agent] running cmd: ${cmd.slice(0, 200)}`);
       const result = await executor.runShell({
         command: cmd,
@@ -96,9 +113,19 @@ async function analyzeAndInstall(
         timeoutMs,
       });
       if (result.exitCode !== 0) {
-        console.log(`[setup-agent] cmd failed: ${result.stderr.slice(0, 300)}`);
-        lastError = result.stderr.slice(0, 500);
+        const oom = isOomFailure(result);
+        console.log(
+          `[setup-agent] cmd failed${oom ? " (OOM)" : ""}: exit=${result.exitCode} ${result.stderr.slice(0, 300)}`,
+        );
+        lastError = oom
+          ? `out_of_memory: '${cmd.slice(0, 80)}' killed by OS (exit ${result.exitCode}). ` +
+            `Skip this command — the sandbox cannot allocate enough memory for it.`
+          : result.stderr.slice(0, 500);
         allOk = false;
+        // On OOM, do not retry the same plan — abort this attempt immediately
+        // so the diagnosis LLM gets a real signal instead of grinding the same
+        // command three more times.
+        if (oom) return { success: false, error: lastError };
         break;
       }
     }
@@ -312,15 +339,14 @@ async function askAgentForInstallPlan(configFiles: Record<string, string>): Prom
     .map(([name, content]) => `--- ${name} ---\n${content}`)
     .join("\n\n");
 
-  const prompt = `You are setting up a CI environment for an open-source project.
+  const prompt = `You are setting up a CI environment so a Python test suite can be executed against a project.
 The following config files were found in the project root:
 
 ${filesText || "(no config files found)"}
 
 Based on these files, determine:
-1. What language(s) the project uses
-2. What build system / package manager is used
-3. What commands are needed to install dependencies
+1. The Python install commands needed to run pytest against this project
+2. A verifyCommand that confirms the project imports correctly
 
 Output a JSON object with this exact structure:
 {
@@ -330,18 +356,28 @@ Output a JSON object with this exact structure:
   "notes": "brief explanation of what was detected"
 }
 
-Rules:
+HARD RULES — violations make the validation fail:
 - NEVER use "sudo" — you are already running as root.
-- For Python: create a venv first with "python3 -m venv .venv", then use ".venv/bin/pip install -e . --retries 5 --timeout 30"
-- For Python: also install common test dependencies: ".venv/bin/pip install '.[test]' '.[testing]' '.[dev]' --retries 5 --timeout 30" if those extras exist
-- For Python with C extensions that fail: try installing build deps (gcc, python3-dev via apt-get) then retry with --no-build-isolation
-- For Python without pyproject.toml but with setup.py: use ".venv/bin/pip install -e ."
-- For Node: use "npm install" (or pnpm/yarn based on lock files)
-- For Rust: use "cargo fetch"
-- For Go: use "go mod download"
-- The verifyCommand should check the project imports correctly (e.g. "python -c 'import <package>'" for Python)
-- Also install pytest in the venv: ".venv/bin/pip install pytest"
-- If no package manager detected, output empty commands array with verifyCommand "true"
+- NEVER install or build Node.js / npm / pnpm / yarn dependencies. Many Python
+  repos ship a frontend (e.g. \`webui/\`, \`web/\`, \`frontend/\`, \`ui/\`) alongside
+  the Python source. The Python tests do NOT need that frontend built. The
+  sandbox is memory-constrained and \`npm ci\` / \`next build\` reliably OOMs.
+  IGNORE every \`package.json\` you see.
+- NEVER run any of: \`npm install\`, \`npm ci\`, \`npm run build\`, \`yarn\`,
+  \`yarn install\`, \`yarn build\`, \`pnpm install\`, \`pnpm build\`,
+  \`next build\`, \`vite build\`, \`webpack\`, \`tsc -b\`, \`tsc --build\`.
+- If the project has NO Python config (no \`pyproject.toml\`, no \`setup.py\`,
+  no \`setup.cfg\`, no \`requirements.txt\`), output empty \`commands\` and
+  \`verifyCommand: "true"\` — the validation will gracefully fail.
+
+PYTHON RULES:
+- Create a venv first: "python3 -m venv .venv"
+- Install editable: ".venv/bin/pip install -e . --retries 5 --timeout 30"
+- Install test extras when likely available: ".venv/bin/pip install '.[test]' '.[testing]' '.[dev]' --retries 5 --timeout 30"
+- For C extensions that fail: install build deps (gcc, python3-dev via apt-get) then retry with --no-build-isolation
+- Without pyproject.toml but with setup.py: ".venv/bin/pip install -e ."
+- Always install pytest in the venv: ".venv/bin/pip install pytest"
+- verifyCommand should check the project imports (e.g. ".venv/bin/python -c 'import <pkg>; print(<pkg>.__version__)'")
 
 Only output the JSON object, nothing else.`;
 
@@ -371,7 +407,19 @@ ${errorOutput.slice(0, 1000)}
 Project config files:
 ${filesText || "(none)"}
 
-Diagnose the failure and output a JSON object with an alternative install plan. NEVER use "sudo":
+Diagnose the failure and output a JSON object with an ALTERNATIVE install plan
+(do not repeat commands from the list above — they already failed).
+
+HARD RULES:
+- NEVER use "sudo".
+- NEVER include npm / pnpm / yarn / next / vite / webpack / tsc-build commands.
+  Python tests don't need any frontend asset built. The sandbox OOMs when you try.
+- If the error mentions "out_of_memory" or "Killed" or "exit 137", the previous
+  command exceeded sandbox RAM. Do NOT propose a heavier alternative — propose
+  a lighter one (e.g. install the Python package WITHOUT building optional
+  extras, or skip the failing component entirely).
+
+Schema:
 {
   "commands": ["command1", "command2", ...],
   "verifyCommand": "single command to verify install worked",
@@ -396,6 +444,39 @@ function parsePlan(response: string): InstallPlan {
   } catch {
     return { commands: [], verifyCommand: "true" };
   }
+}
+
+// Match any command that invokes a Node.js package manager or a JS bundler.
+// Skipping these prevents the sandbox from OOMing when a Python repo also ships
+// a frontend (e.g. HKUDS/nanobot's `webui/`).
+const FRONTEND_BUILD_RE = new RegExp(
+  [
+    "(?:^|[\\s;&|()`])npm\\s+(?:ci|install|run\\s+build|run\\s+dev|run\\s+watch|run\\s+start)\\b",
+    "(?:^|[\\s;&|()`])pnpm\\s+(?:install|i|build|run\\s+build|run\\s+dev|run\\s+watch|run\\s+start)\\b",
+    "(?:^|[\\s;&|()`])yarn\\s+(?:install|add|build|run\\s+build|run\\s+dev|run\\s+watch|run\\s+start)\\b",
+    "(?:^|[\\s;&|()`])yarn(?:\\s|$)",
+    "(?:^|[\\s;&|()`])bun\\s+(?:install|build|run\\s+build)\\b",
+    "(?:^|[\\s;&|()`])npx\\s+(?:next|vite|webpack|rollup|esbuild|turbo)\\b",
+    "(?:^|[\\s;&|()`])(?:next|vite|webpack|rollup|esbuild|turbo|parcel)(?:\\s+(?:build|dev)\\b|\\s*$)",
+    "(?:^|[\\s;&|()`])tsc\\s+(?:-b|--build)\\b",
+  ].join("|"),
+);
+
+function isFrontendBuildCommand(cmd: string): boolean {
+  return FRONTEND_BUILD_RE.test(cmd);
+}
+
+/** Detect commands killed by the OOM killer (exit 137) or V8 GC blow-ups. */
+function isOomFailure(result: { exitCode: number; stdout: string; stderr: string }): boolean {
+  if (result.exitCode === 137) return true;
+  const blob = `${result.stdout}\n${result.stderr}`.toLowerCase();
+  return (
+    blob.includes("killed") &&
+    (blob.includes("npm") || blob.includes("node") || blob.includes("oom") || blob.includes("out of memory") || /\bsignal\s*9\b/.test(blob))
+  ) ||
+    blob.includes("javascript heap out of memory") ||
+    blob.includes("allocation failure; scavenge might not succeed") ||
+    blob.includes("mark-compact");
 }
 
 async function callLLM(prompt: string): Promise<string> {
