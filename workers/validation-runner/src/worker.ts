@@ -20,26 +20,17 @@ import { createValidationRunnerObjectStore } from "./object-store.js";
 const databaseUrl = readRequiredEnv("DATABASE_URL");
 const redisUrl = readRequiredEnv("REDIS_URL");
 
+const MAX_TEST_GEN_ATTEMPTS = 3;
+
 const db = createDb(databaseUrl);
 const connection = createRedisConnection(redisUrl, {
   maxRetriesPerRequest: null,
 });
-const graderConfig =
-  process.env.GRADER_API_KEY && process.env.GRADER_MODEL_ID
-    ? {
-        apiKey: process.env.GRADER_API_KEY,
-        modelId: process.env.GRADER_MODEL_ID,
-        ...(process.env.GRADER_THRESHOLD
-          ? { threshold: Number.parseInt(process.env.GRADER_THRESHOLD, 10) }
-          : {}),
-      }
-    : undefined;
 
 const store = createDrizzleValidationRunnerStore(db);
 const processor = createValidationRunnerProcessor({
   store,
   objectStore: createValidationRunnerObjectStore(),
-  ...(graderConfig && { grader: graderConfig }),
 });
 const worker = createValidationRunnerWorker({
   connection,
@@ -122,28 +113,16 @@ async function handleValidationCompletion(
   if (status === "accepted") {
     await db
       .update(caseVersions)
-      .set({ status: "candidate" })
+      .set({ status: "candidate", evaluatorStrategy: "deterministic_tests" })
       .where(eq(caseVersions.id, caseVersion.id));
-    console.log(`[validation-runner] Case version ${caseVersion.id} marked as candidate (accepted)`);
+    console.log(
+      `[validation-runner] Case version ${caseVersion.id} marked candidate + deterministic_tests`,
+    );
     return;
   }
 
-  // Rejected or error: decide whether to retry or fallback
-  const strategy = attempt.strategy ?? "unit_tests";
   const attemptNumber = attempt.attemptNumber ?? 1;
-
-  if (strategy === "reproduction_steps") {
-    // No more retries after reproduction steps fail
-    await db
-      .update(caseVersions)
-      .set({ status: "rejected" })
-      .where(eq(caseVersions.id, caseVersion.id));
-    console.log(`[validation-runner] Case version ${caseVersion.id} marked as rejected (reproduction steps failed)`);
-    return;
-  }
-
-  if (attemptNumber < 3) {
-    // Retry with unit tests
+  if (attemptNumber < MAX_TEST_GEN_ATTEMPTS) {
     const retryJobId = `case-builder-prepare-${caseVersion.id}-attempt-${attemptNumber + 1}`;
     const retryData: Parameters<typeof caseBuilderQueue.add>[1] = {
       caseId: caseVersion.caseId,
@@ -157,39 +136,27 @@ async function handleValidationCompletion(
       },
       enqueuedAt: new Date().toISOString(),
       attemptNumber: attemptNumber + 1,
-      strategy: "unit_tests",
       previousAttemptId: attempt.id,
     };
     if (caseVersion.validationLogArtifactId) {
       retryData.previousValidationLogArtifactId = caseVersion.validationLogArtifactId;
     }
     await caseBuilderQueue.add(caseBuilderPrepareJobName, retryData, { jobId: retryJobId });
-    console.log(`[validation-runner] Enqueued unit-test retry attempt ${attemptNumber + 1} for case version ${caseVersion.id}`);
+    console.log(
+      `[validation-runner] Enqueued test-gen retry attempt ${attemptNumber + 1} for case version ${caseVersion.id}`,
+    );
     return;
   }
 
-  // Fallback to reproduction steps after 3 failed unit-test attempts
-  const fallbackJobId = `case-builder-prepare-${caseVersion.id}-reproduction-steps`;
-  const fallbackData: Parameters<typeof caseBuilderQueue.add>[1] = {
-    caseId: caseVersion.caseId,
-    caseVersionId: caseVersion.id,
-    githubIssueId: caseVersion.githubIssueId ?? "",
-    githubPullRequestId: caseVersion.githubPullRequestId ?? "",
-    artifactIds: {
-      issue: caseVersion.issueArtifactId ?? "",
-      pullRequest: caseVersion.pullRequestArtifactId ?? "",
-      repositoryMetadata: caseVersion.repositoryMetadataArtifactId ?? "",
-    },
-    enqueuedAt: new Date().toISOString(),
-    attemptNumber: attemptNumber + 1,
-    strategy: "reproduction_steps",
-    previousAttemptId: attempt.id,
-  };
-  if (caseVersion.validationLogArtifactId) {
-    fallbackData.previousValidationLogArtifactId = caseVersion.validationLogArtifactId;
-  }
-  await caseBuilderQueue.add(caseBuilderPrepareJobName, fallbackData, { jobId: fallbackJobId });
-  console.log(`[validation-runner] Enqueued reproduction-steps fallback for case version ${caseVersion.id}`);
+  // Exhausted deterministic test-gen attempts. Lock the case to llm_evaluator_only;
+  // the benchmark runner will spawn a Pi-evaluator agent at run time.
+  await db
+    .update(caseVersions)
+    .set({ status: "candidate", evaluatorStrategy: "llm_evaluator_only" })
+    .where(eq(caseVersions.id, caseVersion.id));
+  console.log(
+    `[validation-runner] Case version ${caseVersion.id} test-gen exhausted (${MAX_TEST_GEN_ATTEMPTS} attempts) — locked to llm_evaluator_only`,
+  );
 }
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {

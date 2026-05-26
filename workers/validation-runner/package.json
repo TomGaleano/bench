@@ -12,6 +12,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "pnpm run typecheck && pnpm run test",
+    "dev": "tsx watch --env-file=../../.env src/worker.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "worker": "tsx --env-file=../../.env src/worker.ts"

@@ -92,6 +92,20 @@
       "when": 1780000000000,
       "tag": "0012_playground_follow_ups",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1780100000000,
+      "tag": "0013_swe_bench_evaluator_strategy",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1748131200000,
+      "tag": "0014_drop_gold_edit_atoms",
+      "breakpoints": true
     }
   ]
 }

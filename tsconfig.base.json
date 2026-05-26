@@ -26,10 +26,8 @@
       "@pilab/github": ["packages/github/src/index.ts"],
       "@pilab/harness": ["packages/harness/src/index.ts"],
       "@pilab/jobs": ["packages/jobs/src/index.ts"],
-      "@pilab/judge": ["workers/judge/src/index.ts"],
       "@pilab/model-sync": ["workers/model-sync/src/index.ts"],
       "@pilab/object-store": ["packages/object-store/src/index.ts"],
-      "@pilab/runner-pi": ["workers/runner-pi/src/index.ts"],
       "@pilab/runtime": ["packages/runtime/src/index.ts"],
       "@pilab/shared": ["packages/shared/src/index.ts"],
       "@pilab/validation-runner": ["workers/validation-runner/src/index.ts"]

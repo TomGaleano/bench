@@ -28,15 +28,6 @@ export type GitHubCase = {
   frozenAt: string | null;
 };
 
-export type PiPlanRunRequest = {
-  caseVersionId: string;
-  modelId: string;
-  prompt?: string;
-  workspacePath?: string;
-  maxTurns?: number;
-  maxWallClockSeconds?: number;
-};
-
 export type RunSummary = {
   id: string;
   caseVersionId: string | null;
@@ -57,11 +48,6 @@ export type RunSummary = {
       byteSize: number | null;
       contentType: string | null;
     } | null;
-  } | null;
-  piRunnerJob?: {
-    id: string;
-    state: string;
-    progress: unknown;
   } | null;
   gradingStatus?: {
     plan?: { jobId: string; state: string } | null;
@@ -103,23 +89,6 @@ export async function createGitHubCase(payload: GitHubCaseCreateRequest) {
   }
 
   return response.json() as Promise<GitHubCase>;
-}
-
-export async function createPiPlanRun(payload: PiPlanRunRequest) {
-  const response = await fetch(`${getApiBaseUrl()}/runs/pi/plan`, {
-    body: JSON.stringify(payload),
-    headers: {
-      "Content-Type": "application/json"
-    },
-    method: "POST"
-  });
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `API request failed with ${response.status}`);
-  }
-
-  return response.json() as Promise<RunSummary>;
 }
 
 export async function listRuns() {
@@ -210,28 +179,22 @@ export type ValidationAttemptSummary = {
   acceptedTestCount: number;
   rejectedTestCount: number;
   runnerVersion: string;
+  baseLogArtifactId: string | null;
+  goldLogArtifactId: string | null;
+  candidateTestsArtifactId: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
 };
 
-export type ReproductionStepSummary = {
-  id: string;
-  validationAttemptId: string | null;
-  steps: Array<{ description: string; command: string }>;
-  script: string;
-  rationale: string | null;
-  status: string;
-  reproducedOnBase: boolean | null;
-  fixedOnGold: boolean | null;
-  createdAt: string;
-};
+export type EvaluatorStrategy = "deterministic_tests" | "llm_evaluator_only";
 
 export type CaseVersionDetail = {
   id: string;
   caseId: string;
   version: number;
   status: string;
+  evaluatorStrategy: EvaluatorStrategy | null;
   repoOwner: string;
   repoName: string;
   baseCommitSha: string;
@@ -242,7 +205,6 @@ export type CaseVersionDetail = {
   frozenAt: string | null;
   testSpecs: TestSpecSummary[];
   validationAttempts: ValidationAttemptSummary[];
-  reproductionSteps: ReproductionStepSummary[];
 };
 
 export async function getCaseVersionDetail(caseId: string, versionId: string) {
@@ -1151,25 +1113,3 @@ export async function getGradingScores(runId: string): Promise<GradingScores> {
   return response.json() as Promise<GradingScores>;
 }
 
-export type CreateImplRunData = {
-  caseVersionId: string;
-  modelId: string;
-  planArtifactKey?: string;
-  maxTurns?: number;
-  maxWallClockSeconds?: number;
-};
-
-export async function createImplRun(data: CreateImplRunData): Promise<RunSummary> {
-  const response = await fetch(`${getApiBaseUrl()}/runs/pi/impl`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `API request failed with ${response.status}`);
-  }
-
-  return response.json() as Promise<RunSummary>;
-}

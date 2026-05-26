@@ -3,7 +3,6 @@ import {
   caseVersions,
   githubIssues,
   githubPullRequests,
-  reproductionSteps,
   testSpecs,
   validationAttempts,
 } from "@pilab/db";
@@ -13,7 +12,6 @@ import {
   type CaseBuilderPrepareJobData,
   type CaseBuilderPrepareJobResult,
   type ValidationRunnerJobData,
-  type ReproductionValidatorJobData,
 } from "@pilab/jobs";
 import type { JsonValue, StoredArtifact } from "@pilab/object-store";
 import { eq, inArray } from "drizzle-orm";
@@ -22,12 +20,7 @@ import type {
   ProposedTestKind,
   TestBuilderInput,
   TestBuilderRun,
-} from "./openrouter-test-builder.js";
-import type {
-  ReproductionStepBuilderCandidate,
-  ReproductionStepBuilderInput,
-  ReproductionStepBuilderRun,
-} from "./reproduction-step-builder.js";
+} from "./test-builder-types.js";
 
 type CaseVersionRow = typeof caseVersions.$inferSelect;
 type ArtifactRow = typeof artifacts.$inferSelect;
@@ -52,16 +45,8 @@ export type CaseBuilderTestBuilder = {
   build(input: TestBuilderInput): Promise<TestBuilderRun>;
 };
 
-export type CaseBuilderReproductionStepBuilder = {
-  build(input: ReproductionStepBuilderInput): Promise<ReproductionStepBuilderRun>;
-};
-
 export type CaseBuilderValidationRunner = {
   enqueue(data: ValidationRunnerJobData): Promise<{ id: string }>;
-};
-
-export type CaseBuilderReproductionValidator = {
-  enqueue(data: ReproductionValidatorJobData): Promise<{ id: string }>;
 };
 
 export type CaseBuilderPreflightStore = {
@@ -79,7 +64,6 @@ export type CaseBuilderPreflightStore = {
     runnerVersion: string;
     rawResults: Record<string, unknown>;
     attemptNumber?: number;
-    strategy?: "unit_tests" | "reproduction_steps";
     previousAttemptId?: string;
   }): Promise<ValidationAttemptRow>;
   createProposedTestSpecs?(input: {
@@ -88,14 +72,6 @@ export type CaseBuilderPreflightStore = {
     tests: ProposedTestSpecRecord[];
     metadata: Record<string, unknown>;
   }): Promise<TestSpecRow[]>;
-  createReproductionSteps?(input: {
-    caseVersionId: string;
-    validationAttemptId: string;
-    steps: { description: string; command: string }[];
-    script: string;
-    rationale: string;
-    metadata: Record<string, unknown>;
-  }): Promise<{ id: string }>;
   markCaseVersionTestBuilder?(input: {
     caseVersionId: string;
     modelId: string;
@@ -120,7 +96,6 @@ type CaseBuilderPersistenceStore = CaseBuilderPreflightStore & Required<
     | "createRawJsonArtifact"
     | "createValidationAttempt"
     | "createProposedTestSpecs"
-    | "createReproductionSteps"
     | "markCaseVersionTestBuilder"
   >
 >;
@@ -203,9 +178,6 @@ export function createDrizzleCaseBuilderPreflightStore(
       if (input.attemptNumber) {
         values.attemptNumber = input.attemptNumber;
       }
-      if (input.strategy) {
-        values.strategy = input.strategy;
-      }
       if (input.previousAttemptId) {
         values.previousAttemptId = input.previousAttemptId;
       }
@@ -247,25 +219,6 @@ export function createDrizzleCaseBuilderPreflightStore(
         )
         .returning();
     },
-    async createReproductionSteps(input) {
-      const [row] = await db
-        .insert(reproductionSteps)
-        .values({
-          caseVersionId: input.caseVersionId,
-          validationAttemptId: input.validationAttemptId,
-          steps: input.steps,
-          script: input.script,
-          rationale: input.rationale,
-          metadata: input.metadata,
-        })
-        .returning();
-
-      if (!row) {
-        throw new Error("Failed to create reproduction steps");
-      }
-
-      return { id: row.id };
-    },
     async markCaseVersionTestBuilder(input) {
       const caseVersion = await db.query.caseVersions.findFirst({
         where: eq(caseVersions.id, input.caseVersionId),
@@ -293,9 +246,7 @@ export function createCaseBuilderPrepareProcessor(input: {
   store: CaseBuilderPreflightStore;
   objectStore?: CaseBuilderObjectStoreLike;
   testBuilder?: CaseBuilderTestBuilder;
-  reproductionStepBuilder?: CaseBuilderReproductionStepBuilder;
   validationRunner?: CaseBuilderValidationRunner;
-  reproductionValidator?: CaseBuilderReproductionValidator;
 }) {
   return async (
     job: CaseBuilderPrepareJobLike,
@@ -391,9 +342,7 @@ export function createCaseBuilderPrepareProcessor(input: {
         ),
       );
 
-      const strategy = job.data.strategy ?? "unit_tests";
-
-      if (strategy === "unit_tests") {
+      {
         if (!input.objectStore || !input.testBuilder) {
           return {
             caseId: job.data.caseId,
@@ -485,7 +434,6 @@ export function createCaseBuilderPrepareProcessor(input: {
             proposedTestCount: testBuilderRun.candidate.proposedTests.length,
           },
           attemptNumber: job.data.attemptNumber ?? 1,
-          strategy: "unit_tests",
           ...(job.data.previousAttemptId
             ? { previousAttemptId: job.data.previousAttemptId }
             : {}),
@@ -495,7 +443,7 @@ export function createCaseBuilderPrepareProcessor(input: {
           validationAttemptId: validationAttempt.id,
           tests: testBuilderRun.candidate.proposedTests,
           metadata: {
-            source: "openrouter-test-builder",
+            source: "pi-test-builder",
             modelId: testBuilderRun.modelId,
             candidateTestsArtifactId: candidateTestsArtifact.id,
             validationAttemptId: validationAttempt.id,
@@ -544,150 +492,16 @@ export function createCaseBuilderPrepareProcessor(input: {
           validationAttemptId: validationAttempt.id,
           ...(validationJob ? { validationJobId: validationJob.id } : {}),
           testBuilderModelId: testBuilderRun.modelId,
-          strategy: "unit_tests",
           completedAt: new Date().toISOString(),
         };
       }
 
-      // reproduction_steps strategy
-      if (!input.objectStore || !input.reproductionStepBuilder) {
-        return {
-          caseId: job.data.caseId,
-          caseVersionId: job.data.caseVersionId,
-          stage: "ready-for-test-builder",
-          verifiedArtifactCount: foundArtifacts.length,
-          completedAt: new Date().toISOString(),
-        };
-      }
-
-      assertPersistenceStore(input.store);
-
-      await job.updateProgress(
-        createCaseBuilderProgress(
-          "building-test-candidate",
-          "Building reproduction steps with coding agent",
-        ),
-      );
-
-      const artifactById = new Map(foundArtifacts.map((artifact) => [artifact.id, artifact]));
-      const issueArtifact = getRequiredArtifact(
-        artifactById,
-        job.data.artifactIds.issue,
-      );
-      const pullRequestArtifact = getRequiredArtifact(
-        artifactById,
-        job.data.artifactIds.pullRequest,
-      );
-      const repositoryMetadataArtifact = getRequiredArtifact(
-        artifactById,
-        job.data.artifactIds.repositoryMetadata,
-      );
-
-      const reproductionBuilderInput: ReproductionStepBuilderInput = {
-        issueArtifact: await input.objectStore.getJsonArtifact(issueArtifact.objectKey),
-        pullRequestArtifact: await input.objectStore.getJsonArtifact(
-          pullRequestArtifact.objectKey,
-        ),
-        repositoryMetadataArtifact: await input.objectStore.getJsonArtifact(
-          repositoryMetadataArtifact.objectKey,
-        ),
-      };
-
-      if (job.data.previousValidationLogArtifactId) {
-        try {
-          reproductionBuilderInput.previousAttemptLogs = await input.objectStore.getJsonArtifact(
-            job.data.previousValidationLogArtifactId,
-          );
-        } catch {
-          console.warn("[case-builder] Could not load previous validation logs");
-        }
-      }
-
-      const reproductionBuilderRun = await input.reproductionStepBuilder.build(reproductionBuilderInput);
-
-      await job.updateProgress(
-        createCaseBuilderProgress(
-          "persisting-proposed-tests",
-          "Persisting reproduction steps for validation",
-        ),
-      );
-
-      const reproductionStepsArtifact = await persistReproductionSteps({
-        jobData: job.data,
-        caseVersion,
-        verifiedArtifactCount: foundArtifacts.length,
-        objectStore: input.objectStore,
-        store: input.store,
-        reproductionBuilderRun,
-      });
-      const validationAttempt = await input.store.createValidationAttempt({
-        caseVersionId: caseVersion.id,
-        runnerVersion: "pilab.reproduction-validator.pending.v1",
-        rawResults: {
-          source: "case-builder",
-          status: "queued",
-          stepCount: reproductionBuilderRun.candidate.steps.length,
-        },
-        attemptNumber: job.data.attemptNumber ?? 1,
-        strategy: "reproduction_steps",
-        ...(job.data.previousAttemptId
-          ? { previousAttemptId: job.data.previousAttemptId }
-          : {}),
-      });
-      const createdReproductionSteps = await input.store.createReproductionSteps({
-        caseVersionId: caseVersion.id,
-        validationAttemptId: validationAttempt.id,
-        steps: reproductionBuilderRun.candidate.steps,
-        script: reproductionBuilderRun.candidate.script,
-        rationale: reproductionBuilderRun.candidate.rationale,
-        metadata: {
-          source: "openrouter-reproduction-step-builder",
-          modelId: reproductionBuilderRun.modelId,
-          reproductionStepsArtifactId: reproductionStepsArtifact.id,
-          validationAttemptId: validationAttempt.id,
-        },
-      });
-      const validationJob = input.reproductionValidator
-        ? await input.reproductionValidator.enqueue({
-            caseVersionId: caseVersion.id,
-            reproductionStepsId: createdReproductionSteps.id,
-            validationAttemptId: validationAttempt.id,
-            enqueuedAt: new Date().toISOString(),
-          })
-        : null;
-
-      await input.store.markCaseVersionTestBuilder({
-        caseVersionId: caseVersion.id,
-        modelId: reproductionBuilderRun.modelId,
-        metadata: {
-          modelId: reproductionBuilderRun.modelId,
-          reproductionStepsArtifactId: reproductionStepsArtifact.id,
-          validationAttemptId: validationAttempt.id,
-          validationJobId: validationJob?.id ?? null,
-          stepCount: reproductionBuilderRun.candidate.steps.length,
-          strategy: "reproduction_steps",
-        },
-      });
-
-      await job.updateProgress(
-        createCaseBuilderProgress(
-          "ready-for-validation",
-          "Reproduction steps are queued for validation",
-        ),
-      );
-
+      // Fell through: no objectStore / testBuilder. Return as preflight-only.
       return {
         caseId: job.data.caseId,
         caseVersionId: job.data.caseVersionId,
-        stage: "ready-for-validation",
+        stage: "ready-for-test-builder",
         verifiedArtifactCount: foundArtifacts.length,
-        proposedTestCount: reproductionBuilderRun.candidate.steps.length,
-        reproductionStepsId: createdReproductionSteps.id,
-        reproductionStepsArtifactId: reproductionStepsArtifact.id,
-        validationAttemptId: validationAttempt.id,
-        ...(validationJob ? { validationJobId: validationJob.id } : {}),
-        testBuilderModelId: reproductionBuilderRun.modelId,
-        strategy: "reproduction_steps",
         completedAt: new Date().toISOString(),
       };
     } catch (error) {
@@ -714,7 +528,7 @@ async function persistCandidateTests(input: {
   const stored = await input.objectStore.putJsonArtifact({
     key,
     value: {
-      source: "openrouter-test-builder",
+      source: "pi-test-builder",
       caseId: input.jobData.caseId,
       caseVersionId: input.jobData.caseVersionId,
       githubIssueId: input.jobData.githubIssueId,
@@ -740,54 +554,9 @@ async function persistCandidateTests(input: {
     metadata: {
       caseId: input.jobData.caseId,
       caseVersionId: input.jobData.caseVersionId,
-      source: "openrouter-test-builder",
+      source: "pi-test-builder",
       modelId: input.testBuilderRun.modelId,
       attempts: input.testBuilderRun.attempts,
-    },
-  });
-}
-
-async function persistReproductionSteps(input: {
-  jobData: CaseBuilderPrepareJobData;
-  caseVersion: CaseVersionRow;
-  verifiedArtifactCount: number;
-  objectStore: CaseBuilderObjectStoreLike;
-  store: CaseBuilderPersistenceStore;
-  reproductionBuilderRun: ReproductionStepBuilderRun;
-}): Promise<ArtifactRow> {
-  const key = `cases/${input.jobData.caseId}/versions/${input.caseVersion.version}/reproduction-steps.json`;
-  const stored = await input.objectStore.putJsonArtifact({
-    key,
-    value: {
-      source: "openrouter-reproduction-step-builder",
-      caseId: input.jobData.caseId,
-      caseVersionId: input.jobData.caseVersionId,
-      githubIssueId: input.jobData.githubIssueId,
-      githubPullRequestId: input.jobData.githubPullRequestId,
-      verifiedArtifactCount: input.verifiedArtifactCount,
-      modelId: input.reproductionBuilderRun.modelId,
-      requestedAt: input.reproductionBuilderRun.requestedAt,
-      completedAt: input.reproductionBuilderRun.completedAt,
-      attempts: input.reproductionBuilderRun.attempts,
-      candidate: input.reproductionBuilderRun.candidate,
-      rawResponse: input.reproductionBuilderRun.rawResponse,
-    },
-    metadata: {
-      kind: "candidate_tests",
-      caseId: input.jobData.caseId,
-      caseVersionId: input.jobData.caseVersionId,
-      modelId: input.reproductionBuilderRun.modelId,
-    },
-  });
-
-  return input.store.createRawJsonArtifact({
-    stored,
-    metadata: {
-      caseId: input.jobData.caseId,
-      caseVersionId: input.jobData.caseVersionId,
-      source: "openrouter-reproduction-step-builder",
-      modelId: input.reproductionBuilderRun.modelId,
-      attempts: input.reproductionBuilderRun.attempts,
     },
   });
 }
@@ -822,7 +591,6 @@ function assertPersistenceStore(
     !store.createRawJsonArtifact ||
     !store.createValidationAttempt ||
     !store.createProposedTestSpecs ||
-    !store.createReproductionSteps ||
     !store.markCaseVersionTestBuilder
   ) {
     throw new Error("Case-builder persistence store is not configured");

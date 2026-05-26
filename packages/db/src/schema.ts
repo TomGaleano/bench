@@ -139,14 +139,21 @@ export const validationStatus = pgEnum("validation_status", [
 
 export const validationStrategy = pgEnum("validation_strategy", [
   "unit_tests",
-  "reproduction_steps",
 ]);
 
-export const reproductionStepStatus = pgEnum("reproduction_step_status", [
-  "proposed",
-  "validating",
-  "accepted",
-  "rejected",
+/**
+ * How a case is scored at benchmark time:
+ *  - "deterministic_tests": the validated fail-to-pass / pass-to-pass tests on
+ *    the case_version are run against each agent's worktree.
+ *  - "llm_evaluator_only": deterministic test generation never produced a
+ *    valid set, so a Pi-evaluator agent compares each agent's worktree to the
+ *    gold patch and scores it.
+ *
+ * The strategy is set on `case_versions` at the end of the case-build flow.
+ */
+export const evaluatorStrategy = pgEnum("evaluator_strategy", [
+  "deterministic_tests",
+  "llm_evaluator_only",
 ]);
 
 export const users = pgTable(
@@ -426,6 +433,7 @@ export const caseVersions = pgTable(
       .notNull(),
     testBuilderModelId: text("test_builder_model_id"),
     validationRunnerVersion: text("validation_runner_version"),
+    evaluatorStrategy: evaluatorStrategy("evaluator_strategy"),
     metadata: jsonb("metadata")
       .$type<JsonRecord>()
       .default(emptyObject)
@@ -443,6 +451,7 @@ export const caseVersions = pgTable(
     index("case_versions_case_id_idx").on(table.caseId),
     index("case_versions_status_idx").on(table.status),
     index("case_versions_github_pr_id_idx").on(table.githubPullRequestId),
+    index("case_versions_evaluator_strategy_idx").on(table.evaluatorStrategy),
   ],
 );
 
@@ -594,6 +603,7 @@ export const experiments = pgTable(
     mode: experimentMode("mode").notNull(),
     status: runStatus("status").default("queued").notNull(),
     matrix: jsonb("matrix").$type<JsonRecord>().default(emptyObject).notNull(),
+    sandboxId: text("sandbox_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -711,6 +721,9 @@ export const runs = pgTable(
     parentRunId: uuid("parent_run_id").references((): AnyPgColumn => runs.id, {
       onDelete: "set null",
     }),
+    evaluatorRunId: uuid("evaluator_run_id").references((): AnyPgColumn => runs.id, {
+      onDelete: "set null",
+    }),
     openRouterModelId: text("openrouter_model_id"),
     providerRoutingConfig: jsonb("provider_routing_config")
       .$type<JsonRecord>()
@@ -742,6 +755,7 @@ export const runs = pgTable(
     index("runs_case_version_id_idx").on(table.caseVersionId),
     index("runs_status_idx").on(table.status),
     index("runs_openrouter_model_id_idx").on(table.openRouterModelId),
+    index("runs_evaluator_run_id_idx").on(table.evaluatorRunId),
   ],
 );
 
@@ -792,40 +806,6 @@ export const plans = pgTable(
   (table) => [
     index("plans_run_id_idx").on(table.runId),
     index("plans_case_version_id_idx").on(table.caseVersionId),
-  ],
-);
-
-export const goldEditAtoms = pgTable(
-  "gold_edit_atoms",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    caseVersionId: uuid("case_version_id")
-      .notNull()
-      .references(() => caseVersions.id, { onDelete: "cascade" }),
-    sourcePatchArtifactId: uuid("source_patch_artifact_id").references(
-      () => artifacts.id,
-      {
-        onDelete: "set null",
-      },
-    ),
-    atomKey: text("atom_key"),
-    filePath: text("file_path").notNull(),
-    symbol: text("symbol"),
-    behavior: text("behavior").notNull(),
-    required: boolean("required").default(true).notNull(),
-    weight: numeric("weight", { precision: 8, scale: 4 }).notNull(),
-    humanEdited: boolean("human_edited").default(false).notNull(),
-    metadata: jsonb("metadata")
-      .$type<JsonRecord>()
-      .default(emptyObject)
-      .notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-  },
-  (table) => [
-    index("gold_edit_atoms_case_version_id_idx").on(table.caseVersionId),
-    index("gold_edit_atoms_file_path_idx").on(table.filePath),
   ],
 );
 
@@ -1067,46 +1047,6 @@ export const testSpecs = pgTable(
   ],
 );
 
-export const reproductionSteps = pgTable(
-  "reproduction_steps",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    caseVersionId: uuid("case_version_id")
-      .notNull()
-      .references(() => caseVersions.id, { onDelete: "cascade" }),
-    validationAttemptId: uuid("validation_attempt_id").references(
-      () => validationAttempts.id,
-      { onDelete: "set null" },
-    ),
-    steps: jsonb("steps")
-      .$type<{ description: string; command: string }[]>()
-      .notNull(),
-    script: text("script").notNull(),
-    rationale: text("rationale"),
-    status: reproductionStepStatus("status").default("proposed").notNull(),
-    reproducedOnBase: boolean("reproduced_on_base"),
-    fixedOnGold: boolean("fixed_on_gold"),
-    metadata: jsonb("metadata")
-      .$type<JsonRecord>()
-      .default(emptyObject)
-      .notNull(),
-    rawResults: jsonb("raw_results")
-      .$type<JsonRecord>()
-      .default(emptyObject)
-      .notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true })
-      .defaultNow()
-      .notNull(),
-  },
-  (table) => [
-    index("reproduction_steps_case_version_id_idx").on(table.caseVersionId),
-    index("reproduction_steps_validation_attempt_id_idx").on(
-      table.validationAttemptId,
-    ),
-    index("reproduction_steps_status_idx").on(table.status),
-  ],
-);
-
 export const benchmarksRelations = relations(benchmarks, ({ many, one }) => ({
   owner: one(users, {
     fields: [benchmarks.ownerUserId],
@@ -1147,10 +1087,8 @@ export const caseVersionsRelations = relations(
       references: [githubPullRequests.id],
     }),
     runs: many(runs),
-    atoms: many(goldEditAtoms),
     testSpecs: many(testSpecs),
     validationAttempts: many(validationAttempts),
-    reproductionSteps: many(reproductionSteps),
   }),
 );
 
@@ -1164,20 +1102,6 @@ export const testSpecsRelations = relations(testSpecs, ({ one }) => ({
     references: [validationAttempts.id],
   }),
 }));
-
-export const reproductionStepsRelations = relations(
-  reproductionSteps,
-  ({ one }) => ({
-    caseVersion: one(caseVersions, {
-      fields: [reproductionSteps.caseVersionId],
-      references: [caseVersions.id],
-    }),
-    validationAttempt: one(validationAttempts, {
-      fields: [reproductionSteps.validationAttemptId],
-      references: [validationAttempts.id],
-    }),
-  }),
-);
 
 export const datasetStatus = pgEnum("dataset_status", [
   "draft",
@@ -1333,7 +1257,6 @@ export const validationAttemptsRelations = relations(
       references: [caseVersions.id],
     }),
     testSpecs: many(testSpecs),
-    reproductionSteps: many(reproductionSteps),
   }),
 );
 
@@ -1394,8 +1317,6 @@ export type RunEvent = typeof runEvents.$inferSelect;
 export type NewRunEvent = typeof runEvents.$inferInsert;
 export type Plan = typeof plans.$inferSelect;
 export type NewPlan = typeof plans.$inferInsert;
-export type GoldEditAtom = typeof goldEditAtoms.$inferSelect;
-export type NewGoldEditAtom = typeof goldEditAtoms.$inferInsert;
 export type PlanScore = typeof planScores.$inferSelect;
 export type NewPlanScore = typeof planScores.$inferInsert;
 export type Patch = typeof patches.$inferSelect;
@@ -1416,7 +1337,6 @@ export type ExperimentCaseVersion = typeof experimentCaseVersions.$inferSelect;
 export type NewExperimentCaseVersion = typeof experimentCaseVersions.$inferInsert;
 export type GraderVerdict = typeof graderVerdicts.$inferSelect;
 export type NewGraderVerdict = typeof graderVerdicts.$inferInsert;
-export type ReproductionStep = typeof reproductionSteps.$inferSelect;
-export type NewReproductionStep = typeof reproductionSteps.$inferInsert;
+export type EvaluatorStrategy = (typeof evaluatorStrategy.enumValues)[number];
 
 export * from "./playground-schema.js";

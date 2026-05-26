@@ -11,6 +11,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/jobs" },
-    { "path": "../../packages/object-store" }
+    { "path": "../../packages/object-store" },
+    { "path": "../../packages/runtime" }
   ]
 }
